@@ -105,6 +105,24 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+pub fn stats() -> Result<()> {
+    let memory = open()?;
+    let stats = memory.usage_stats()?;
+    if stats.is_empty() {
+        println!("Nothing used yet — stats appear once sessions inject memories or invoke skills.");
+        return Ok(());
+    }
+
+    println!("{:>5}  {:<20}  {:<8}  name", "uses", "last used", "kind");
+    for stat in stats {
+        println!(
+            "{:>5}  {:<20}  {:<8}  {}",
+            stat.uses, stat.last_used, stat.kind, stat.name
+        );
+    }
+    Ok(())
+}
+
 fn open() -> Result<Memory> {
     Memory::open(&paths::memory_dir())
 }

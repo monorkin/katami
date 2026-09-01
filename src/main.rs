@@ -94,6 +94,8 @@ enum MemoryCommand {
     Show { id: i64 },
     /// List all memories
     List,
+    /// Show how often memories were injected and skills invoked
+    Stats,
     /// Download the embedding model that powers semantic search
     PullModels,
     /// Consolidate observations into cards and retire unused skills now
@@ -148,6 +150,7 @@ fn run(cli: Cli) -> Result<()> {
             MemoryCommand::Search { query } => memory_cli::search(&query),
             MemoryCommand::Show { id } => memory_cli::show(id),
             MemoryCommand::List => memory_cli::list(),
+            MemoryCommand::Stats => memory_cli::stats(),
             MemoryCommand::PullModels => embeddings::pull(),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),
         },

@@ -41,6 +41,13 @@ impl Kind {
     }
 }
 
+pub struct UsageStat {
+    pub kind: String,
+    pub name: String,
+    pub uses: i64,
+    pub last_used: String,
+}
+
 pub struct GeneratedSkill {
     pub name: String,
     pub description: String,
@@ -331,6 +338,23 @@ impl Memory {
              WHERE m.archived = 0 AND e.memory_id IS NULL",
         )?;
         let rows = statement.query_map([model], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn usage_stats(&self) -> Result<Vec<UsageStat>> {
+        let mut statement = self.connection.prepare(
+            "SELECT kind, name, COUNT(*), MAX(used_at) FROM usage
+             GROUP BY kind, name
+             ORDER BY kind, COUNT(*) DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(UsageStat {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                uses: row.get(2)?,
+                last_used: row.get(3)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
