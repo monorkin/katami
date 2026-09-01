@@ -1,0 +1,18 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "6.0.0"
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1.0.151"
+ureq = { version = "3.4.0", features = ["json"] }
+usage = { version = "6", package = "usage-rs", features = ["completions"] }
+# The wasm feature is how you get the pure-Rust build on any target: it picks
+# fancy-regex over onig and skips esaxx's C++, which won't link against musl
+model2vec-rs = { version = "0.2.1", default-features = false, features = ["wasm"] }
