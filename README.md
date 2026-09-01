@@ -7,6 +7,21 @@ projects, and the people you work with comes back as context in future
 sessions. Inspired by the memory and curation systems in
 [Hermes](https://github.com/NousResearch/hermes-agent). Linux only.
 
+## Installing
+
+```bash
+git clone git@github.com:monorkin/agent.git
+cd agent
+cargo build --release
+install -Dm755 target/release/agent ~/.local/bin/agent
+```
+
+Any directory on your `PATH` works in place of `~/.local/bin`. Then, once:
+
+```bash
+agent memory pull-models   # ~30MB, enables semantic search
+```
+
 ## Usage
 
 ```bash
@@ -67,10 +82,6 @@ collisions (`type -a agent`) before installing; rename the binary in
   curation. A skills dir that's a symlink to shared territory is left alone.
 
 ## Building
-
-```bash
-cargo build --release   # → target/release/agent
-```
 
 Static musl release builds need `musl-tools` (Debian) or `musl` (Arch) for
 the C pieces (bundled SQLite, ring).
