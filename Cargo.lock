@@ -16,6 +16,7 @@ dependencies = [
  "dirs",
  "libc",
  "model2vec-rs",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

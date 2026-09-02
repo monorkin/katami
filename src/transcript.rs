@@ -34,6 +34,9 @@ pub fn delta_since(path: &Path, offset: u64) -> Result<(Vec<Turn>, u64)> {
                 .with_context(|| format!("could not read the transcript {}", path.display()));
         }
     };
+    // A shorter file than the cursor means the transcript was rewritten —
+    // start over rather than staying silent forever
+    let offset = if offset as usize > contents.len() { 0 } else { offset };
     if offset as usize >= contents.len() {
         return Ok((Vec::new(), offset));
     }
@@ -61,12 +64,35 @@ fn turn_from(record: &Value) -> Option<Turn> {
         _ => return None,
     };
 
-    let text = text_blocks(&record["message"]["content"]);
+    let text = strip_injected(&text_blocks(&record["message"]["content"]));
     if text.is_empty() {
         None
     } else {
         Some(Turn { role, text })
     }
+}
+
+/// Context the supervisor injected comes back through the transcript inside
+/// user turns. Left in place, every injected memory would echo through the
+/// reviewer and the store would slowly ingest its own output — so the
+/// sentinel-wrapped spans are cut before distillation.
+fn strip_injected(text: &str) -> String {
+    const OPEN: &str = "<agent-memory>";
+    const CLOSE: &str = "</agent-memory>";
+
+    let mut remaining = text;
+    let mut stripped = String::new();
+    while let Some(start) = remaining.find(OPEN) {
+        stripped.push_str(&remaining[..start]);
+        match remaining[start..].find(CLOSE) {
+            Some(end) => remaining = &remaining[start + end + CLOSE.len()..],
+            None => {
+                remaining = "";
+            }
+        }
+    }
+    stripped.push_str(remaining);
+    stripped.trim().to_string()
 }
 
 fn text_blocks(content: &Value) -> String {
@@ -131,5 +157,28 @@ mod tests {
         assert!(again.is_empty());
         assert_eq!(unchanged, offset);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_transcripts_and_shrunken_files_recover() {
+        let missing = std::env::temp_dir().join("agent-no-such-transcript.jsonl");
+        let (turns, offset) = delta_since(&missing, 42).unwrap();
+        assert!(turns.is_empty());
+        assert_eq!(offset, 42);
+
+        let path = fixture();
+        let (turns, _) = delta_since(&path, 1_000_000).unwrap();
+        assert_eq!(turns.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn injected_memory_spans_are_stripped() {
+        assert_eq!(
+            strip_injected("before <agent-memory>\ninjected stuff\n</agent-memory> after"),
+            "before  after"
+        );
+        assert_eq!(strip_injected("<agent-memory>all of it"), "");
+        assert_eq!(strip_injected("untouched"), "untouched");
     }
 }

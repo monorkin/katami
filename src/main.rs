@@ -53,6 +53,8 @@ enum Command {
         transcript: PathBuf,
         #[usage(long)]
         config_dir: PathBuf,
+        #[usage(long)]
+        cwd: Option<PathBuf>,
     },
     /// Consolidate memories and retire unused skills (spawned by the supervisor)
     #[usage(hide = true)]
@@ -92,6 +94,12 @@ enum MemoryCommand {
     Search { query: String },
     /// Show one memory with its links
     Show { id: i64 },
+    /// Open a memory in $EDITOR
+    Edit { id: i64 },
+    /// Retire a memory so it stops being injected
+    Archive { id: i64 },
+    /// Bring an archived memory back
+    Restore { id: i64 },
     /// List all memories
     List,
     /// Show how often memories were injected and skills invoked
@@ -137,7 +145,8 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::Review {
             transcript,
             config_dir,
-        }) => reviewer::run(&transcript, &config_dir),
+            cwd,
+        }) => reviewer::run(&transcript, &config_dir, cwd.as_deref()),
         Some(Command::Curate { config_dir }) => curator::run(&config_dir),
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Add {
@@ -149,6 +158,9 @@ fn run(cli: Cli) -> Result<()> {
             } => memory_cli::add(&title, &body, entity, link, card),
             MemoryCommand::Search { query } => memory_cli::search(&query),
             MemoryCommand::Show { id } => memory_cli::show(id),
+            MemoryCommand::Edit { id } => memory_cli::edit(id),
+            MemoryCommand::Archive { id } => memory_cli::archive(id),
+            MemoryCommand::Restore { id } => memory_cli::restore(id),
             MemoryCommand::List => memory_cli::list(),
             MemoryCommand::Stats => memory_cli::stats(),
             MemoryCommand::PullModels => embeddings::pull(),
@@ -170,7 +182,7 @@ pub fn timestamp() -> String {
     format_epoch_seconds(seconds)
 }
 
-fn format_epoch_seconds(seconds: u64) -> String {
+pub fn format_epoch_seconds(seconds: u64) -> String {
     let days_since_epoch = seconds / 86_400;
     let (year, month, day) = civil_date(days_since_epoch);
     let hour = seconds / 3600 % 24;

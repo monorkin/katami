@@ -16,12 +16,11 @@ use std::path::{Path, PathBuf};
 use crate::fsutil;
 use crate::paths;
 
-const EVENTS: [(&str, Option<&str>, u32); 6] = [
+const EVENTS: [(&str, Option<&str>, u32); 5] = [
     ("SessionStart", None, 5),
     ("UserPromptSubmit", None, 3),
     ("PostToolUse", Some("Skill|Read"), 2),
     ("Stop", None, 2),
-    ("PreCompact", None, 2),
     ("SessionEnd", None, 1),
 ];
 
@@ -30,7 +29,16 @@ pub fn write(user_settings: Option<&Path>) -> Result<PathBuf> {
         std::env::current_exe().context("could not determine the agent binary path")?;
 
     let mut settings = match user_settings {
-        Some(path) => fsutil::read_json(path)?,
+        Some(path) => {
+            let parsed = fsutil::read_json(path)?;
+            if !parsed.is_object() {
+                anyhow::bail!(
+                    "{} is not a JSON settings object — claude would refuse it too",
+                    path.display()
+                );
+            }
+            parsed
+        }
         None => json!({}),
     };
     merge_hooks(&mut settings, &hooks(&agent_binary));
@@ -64,13 +72,18 @@ fn hooks(agent_binary: &Path) -> Value {
 fn merge_hooks(settings: &mut Value, ours: &Value) {
     let root = settings
         .as_object_mut()
-        .expect("settings overlay is always a JSON object");
+        .expect("write() rejects non-object settings before merging");
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    // A malformed hooks value (a string, an array) would make claude choke
+    // anyway — replace it rather than panic indexing into it
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
 
-    for (event, entries) in ours.as_object().expect("hooks are always an object") {
+    for (event, entries) in ours.as_object().expect("hooks() always builds an object") {
         match hooks.get_mut(event) {
             Some(Value::Array(existing)) => {
-                existing.extend(entries.as_array().expect("entries are always an array").clone());
+                existing.extend(entries.as_array().expect("hooks() entries are arrays").clone());
             }
             _ => {
                 hooks[event] = entries.clone();

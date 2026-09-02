@@ -29,6 +29,12 @@ pub fn materialize(memory: &Memory, config_dir: &Path) -> Result<()> {
 
     let skills = memory.generated_skills()?;
     for skill in &skills {
+        // The reviewer validates names on the way in, but rows predating that
+        // check (or a hand-edited DB) must still never shape a path
+        if !valid_bare_name(&skill.name) {
+            eprintln!("note: skipping generated skill with unusable name {:?}", skill.name);
+            continue;
+        }
         let contents = format!(
             "---\nname: {PREFIX}{}\ndescription: {}\n---\n\n{}\n",
             skill.name,
@@ -55,11 +61,23 @@ fn remove_stale_entries(
         let Some(bare) = name.strip_prefix(PREFIX) else {
             continue;
         };
+        // Only touch names that could have come from our own materializer —
+        // anything else under the prefix is not ours to remove
+        if !valid_bare_name(bare) {
+            continue;
+        }
         if !skills.iter().any(|it| it.name == bare) {
             std::fs::remove_dir_all(entry.path())?;
         }
     }
     Ok(())
+}
+
+fn valid_bare_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|it| it.is_ascii_lowercase() || it.is_ascii_digit() || it == '-')
 }
 
 #[cfg(test)]

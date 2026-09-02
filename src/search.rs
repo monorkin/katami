@@ -22,10 +22,13 @@ pub fn bm25(memory: &Memory, query: &str, limit: usize) -> Result<Vec<Hit>> {
         return Ok(Vec::new());
     };
 
+    // Status rows are deliberately unsearchable: current-state snapshots only
+    // belong in their own project's SessionStart, never riding a keyword into
+    // an unrelated conversation
     let mut statement = memory.connection.prepare(
         "SELECT f.rowid, bm25(memories_fts) FROM memories_fts f
          JOIN memories m ON m.id = f.rowid
-         WHERE memories_fts MATCH ?1 AND m.archived = 0
+         WHERE memories_fts MATCH ?1 AND m.archived = 0 AND m.kind != 'status'
          ORDER BY bm25(memories_fts) LIMIT ?2",
     )?;
     let rows = statement.query_map(rusqlite::params![sanitized, limit as i64], |row| {
@@ -108,6 +111,7 @@ fn sanitize(query: &str) -> Option<String> {
     let terms: Vec<String> = query
         .split(|it: char| !it.is_alphanumeric())
         .filter(|it| it.len() >= 2)
+        .take(24)
         .map(|it| format!("\"{it}\""))
         .collect();
     if terms.is_empty() {

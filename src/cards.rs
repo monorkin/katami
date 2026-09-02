@@ -37,7 +37,9 @@ pub fn render_all(memory: &Memory, cards_dir: &Path) -> Result<()> {
 }
 
 pub fn render(card: &Stored, cards_dir: &Path) -> Result<()> {
-    let path = cards_dir.join(format!("{}.md", slug(&card.title)));
+    // The id suffix keeps two cards whose titles slug identically from
+    // silently overwriting each other's rendered file
+    let path = cards_dir.join(format!("{}-{}.md", slug(&card.title), card.id));
     let mut contents = format!("# {}\n", card.title);
     if let Some(entity) = &card.entity {
         contents.push_str(&format!("\n_{entity}_\n"));

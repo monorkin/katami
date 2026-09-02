@@ -33,6 +33,8 @@ struct Review {
     observations: Vec<Observation>,
     #[serde(default)]
     skill_proposals: Vec<SkillProposal>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +45,8 @@ struct Observation {
     entity: Option<String>,
     #[serde(default)]
     links: Vec<String>,
+    #[serde(default)]
+    supersedes: Vec<i64>,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +58,12 @@ struct SkillProposal {
 
 /// Called from hook handlers: decides cheaply whether a review is due and
 /// spawns it detached — the hook must return within its timeout.
-pub fn maybe_spawn(transcript_path: &str, config_dir: &Path, force: bool) -> Result<()> {
+pub fn maybe_spawn(
+    transcript_path: &str,
+    config_dir: &Path,
+    cwd: Option<&str>,
+    force: bool,
+) -> Result<()> {
     let memory = Memory::open(&paths::memory_dir())?;
     let offset = memory.cursor(transcript_path)?;
     let (turns, _) = transcript::delta_since(Path::new(transcript_path), offset)?;
@@ -65,12 +74,12 @@ pub fn maybe_spawn(transcript_path: &str, config_dir: &Path, force: bool) -> Res
         transcript::user_turns(&turns) >= DEBOUNCE_USER_TURNS
     };
     if due {
-        spawn_detached(transcript_path, config_dir)?;
+        spawn_detached(transcript_path, config_dir, cwd)?;
     }
     Ok(())
 }
 
-fn spawn_detached(transcript_path: &str, config_dir: &Path) -> Result<()> {
+fn spawn_detached(transcript_path: &str, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
     let agent = std::env::current_exe().context("could not determine the agent binary path")?;
     let mut command = Command::new(agent);
     command
@@ -79,6 +88,9 @@ fn spawn_detached(transcript_path: &str, config_dir: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.args(["--cwd", cwd]);
+    }
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
@@ -93,8 +105,13 @@ fn spawn_detached(transcript_path: &str, config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run(transcript_path: &Path, config_dir: &Path) -> Result<()> {
-    let Some(_lock) = flock::try_acquire(&paths::memory_dir().join("reviewer.lock"))? else {
+pub fn run(transcript_path: &Path, config_dir: &Path, cwd: Option<&Path>) -> Result<()> {
+    // Waiting, not skipping: this may be the last event this transcript ever
+    // fires, and losing the race to another reviewer must not lose the review
+    let lock_patience = std::time::Duration::from_secs(300);
+    let Some(_lock) = flock::acquire(&paths::memory_dir().join("reviewer.lock"), lock_patience)?
+    else {
+        log("gave up waiting for the reviewer lock");
         return Ok(());
     };
 
@@ -112,8 +129,17 @@ pub fn run(transcript_path: &Path, config_dir: &Path) -> Result<()> {
         .and_then(|it| it.parse().ok())
         .unwrap_or(0);
 
-    let reviewed = review(&transcript::distill(&turns), config_dir)
-        .and_then(|it| apply(&memory, &it).map(|()| it));
+    let entity = cwd.map(|it| cards::project_entity(it));
+    let input = format!(
+        "{}\nTranscript:\n{}",
+        known_context(&memory, entity.as_deref())?,
+        transcript::distill(&turns)
+    );
+    let source_session = transcript_path
+        .file_stem()
+        .map(|it| it.to_string_lossy().to_string());
+    let reviewed = review(&input, config_dir, cwd)
+        .and_then(|it| apply(&memory, &it, entity.as_deref(), source_session.as_deref()).map(|()| it));
     match reviewed {
         Ok(review) => {
             memory.set_cursor(&transcript_key, new_offset)?;
@@ -142,10 +168,10 @@ pub fn run(transcript_path: &Path, config_dir: &Path) -> Result<()> {
     }
 }
 
-fn review(distilled: &str, config_dir: &Path) -> Result<Review> {
+fn review(distilled: &str, config_dir: &Path, cwd: Option<&Path>) -> Result<Review> {
     let mut command = Command::new("claude");
     command
-        .args(["-p", REVIEW_PROMPT, "--model", "haiku", "--output-format", "json"])
+        .args(["-p", &review_prompt(cwd), "--model", "haiku", "--output-format", "json"])
         .env("CLAUDE_CONFIG_DIR", config_dir)
         .env_remove("AGENT_HOOK_SOCKET")
         .stdin(Stdio::piped())
@@ -173,39 +199,103 @@ fn review(distilled: &str, config_dir: &Path) -> Result<Review> {
     serde_json::from_str(strip_fences(result)).context("the review was not the expected JSON")
 }
 
-fn apply(memory: &Memory, review: &Review) -> Result<()> {
-    memory.connection.execute_batch("BEGIN IMMEDIATE")?;
-    let applied = try_apply(memory, review);
-    match applied {
-        Ok(()) => memory.connection.execute_batch("COMMIT")?,
-        Err(_) => memory.connection.execute_batch("ROLLBACK")?,
+/// What the store already knows, prepended to the reviewer's input so it can
+/// supersede and skip instead of restating — a reviewer that writes blind
+/// duplicates the store back into itself.
+fn known_context(memory: &Memory, entity: Option<&str>) -> Result<String> {
+    let mut known = String::from(
+        "What you already know (do not restate; if the conversation updates or contradicts an item, supersede it by id):\n",
+    );
+    if let Some(entity) = entity {
+        if let Some(card) = memory.card_for_entity(entity)? {
+            known.push_str(&format!("Card for {entity}:\n{}\n", card.body.trim()));
+        }
+        if let Some(status) = memory.status_for_entity(entity)? {
+            known.push_str(&format!("Current status (as of {}):\n{}\n", &status.updated[..10], status.body.trim()));
+        }
+        for observation in memory.recent_observations_for_entity(entity, 15)? {
+            known.push_str(&format!("[id {}] {}: {}\n", observation.id, observation.title, observation.body));
+        }
     }
-    applied
+    let entities = memory.entities()?;
+    if !entities.is_empty() {
+        known.push_str(&format!("Known entities: {}\n", entities.join(", ")));
+    }
+    Ok(known)
 }
 
-fn try_apply(memory: &Memory, review: &Review) -> Result<()> {
-    for observation in &review.observations {
-        let mut links = cards::extract_links(&observation.body);
-        for link in &observation.links {
-            if !links.contains(link) {
-                links.push(link.clone());
+fn apply(
+    memory: &Memory,
+    review: &Review,
+    entity: Option<&str>,
+    source_session: Option<&str>,
+) -> Result<()> {
+    memory.with_transaction(|memory| {
+        for observation in &review.observations {
+            let mut links = cards::extract_links(&observation.body);
+            for link in &observation.links {
+                if !links.contains(link) {
+                    links.push(link.clone());
+                }
+            }
+            let title = single_line(&observation.title);
+            let id = memory.add(&NewObservation {
+                kind: Kind::Observation,
+                entity: observation.entity.clone(),
+                title: title.clone(),
+                body: observation.body.clone(),
+                links,
+                source_session: source_session.map(str::to_string),
+            })?;
+            embeddings::embed_into(memory, id, &format!("{title}\n{}", observation.body))?;
+            supersede(memory, &observation.supersedes)?;
+        }
+
+        for proposal in &review.skill_proposals {
+            if !valid_skill_name(&proposal.name) {
+                anyhow::bail!(
+                    "the review proposed a skill named '{}' — names must be lowercase letters, digits, and dashes",
+                    proposal.name
+                );
+            }
+            memory.add_generated_skill(&proposal.name, &proposal.description, &proposal.instructions)?;
+        }
+
+        if let (Some(entity), Some(status)) = (entity, &review.status) {
+            if !status.trim().is_empty() {
+                memory.upsert_status(entity, status)?;
             }
         }
-        let id = memory.add(&NewObservation {
-            kind: Kind::Observation,
-            entity: observation.entity.clone(),
-            title: observation.title.clone(),
-            body: observation.body.clone(),
-            links,
-            source_session: None,
-        })?;
-        embeddings::embed_into(memory, id, &format!("{}\n{}", observation.title, observation.body))?;
-    }
+        Ok(())
+    })
+}
 
-    for proposal in &review.skill_proposals {
-        memory.add_generated_skill(&proposal.name, &proposal.description, &proposal.instructions)?;
+fn supersede(memory: &Memory, ids: &[i64]) -> Result<()> {
+    for id in ids {
+        let stored = memory
+            .get(*id)
+            .with_context(|| format!("the review superseded id {id}, which doesn't exist"))?;
+        if stored.kind != "observation" || stored.pinned {
+            anyhow::bail!(
+                "the review tried to supersede id {id}, but only unpinned observations can be superseded"
+            );
+        }
+        memory.archive(*id)?;
     }
     Ok(())
+}
+
+/// Skill names become directory names under the claude config dir — anything
+/// but this strict shape is a path traversal waiting to happen.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.chars().next().is_some_and(|it| it.is_ascii_lowercase() || it.is_ascii_digit())
+        && name.chars().all(|it| it.is_ascii_lowercase() || it.is_ascii_digit() || it == '-')
+}
+
+fn single_line(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn strip_fences(text: &str) -> &str {
@@ -225,16 +315,34 @@ fn log(message: &str) {
     }
 }
 
-const REVIEW_PROMPT: &str = r#"You are reviewing a conversation between a user and their coding assistant. The conversation transcript is on stdin.
+fn review_prompt(cwd: Option<&Path>) -> String {
+    let project_rule = match cwd {
+        Some(cwd) => format!(
+            "- A fact about the project you're working in: \"project:{}\"\n  (this session's project — copy the string exactly, never invent a shorter name for it)",
+            cwd.display()
+        ),
+        None => "- A fact about a specific project: omit entity — this session's project is unknown".to_string(),
+    };
 
-Extract two things:
-1. Observations: durable facts worth remembering across sessions — the user's preferences, corrections they gave, facts about themselves or their projects, decisions made. Skip anything session-specific or derivable from the code itself.
-2. Skill proposals: repeatable multi-step workflows the user asked for that would be worth automating as a reusable skill. Most conversations have none.
+    format!(
+        r#"You are reviewing a conversation between a user and their coding assistant. Stdin has two parts: what the memory store already knows, then the conversation transcript.
+
+Extract three things:
+1. Observations: durable facts that will still be true in a month — the user's preferences, corrections they gave, facts about themselves, their projects, and the people they work with. NOT the state of in-progress work, and NOT anything the store already knows. If the conversation updates or contradicts a known [id N] item, put that id in the new observation's "supersedes" list. An observation's entity is what the fact is ABOUT, not where it was discussed — a fact about a tool, a service, or general practice gets no entity even when it came up inside a project. Skip anything derivable from the code itself, and skip discussion about this memory system.
+2. Status: what's in flight in this session's project right now — open PRs, half-done migrations, blocked work. This REPLACES the previous status entirely, so restate anything still in flight. Omit the field if nothing is in flight or the project is unknown.
+3. Skill proposals: only when the user dictated or corrected a multi-step procedure they'll clearly want again. Most conversations have none.
+
+Entity rules — copy these strings exactly:
+{project_rule}
+- A fact about a person: "person:<the first name they go by>"
+- A fact about the user themselves or any other topic: omit entity
 
 Reply with ONLY this JSON, no prose:
-{"observations":[{"title":"short title","body":"the fact, one to three sentences","entity":"project:/path or person:name (optional)","links":[]}],"skill_proposals":[{"name":"kebab-case-name","description":"one line","instructions":"markdown instructions"}]}
+{{"observations":[{{"title":"short title","body":"the fact, one to three sentences","entity":"see entity rules (optional)","links":[],"supersedes":[]}}],"status":"what's in flight, or omit","skill_proposals":[{{"name":"kebab-case-name","description":"one line","instructions":"markdown instructions"}}]}}
 
-Both arrays may be empty. Titles must be short and distinctive — they double as link targets."#;
+All fields may be empty or absent. Titles must be short and distinctive — they double as link targets."#
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -255,5 +363,53 @@ mod tests {
     fn fenced_json_is_unwrapped() {
         assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn skill_names_that_shape_paths_are_rejected() {
+        assert!(valid_skill_name("deploy-check"));
+        assert!(valid_skill_name("k8s"));
+        assert!(!valid_skill_name("x/../../evil"));
+        assert!(!valid_skill_name("-leading-dash"));
+        assert!(!valid_skill_name("Uppercase"));
+        assert!(!valid_skill_name(""));
+        assert!(!valid_skill_name(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn superseding_archives_only_unpinned_observations() {
+        use crate::memory::{Kind, Memory, NewObservation};
+
+        let memory = Memory::open_in_memory().unwrap();
+        let old = memory
+            .add(&NewObservation {
+                kind: Kind::Observation,
+                entity: None,
+                title: "Old fact".into(),
+                body: "Superseded soon.".into(),
+                links: vec![],
+                source_session: None,
+            })
+            .unwrap();
+        let card = memory
+            .add(&NewObservation {
+                kind: Kind::Card,
+                entity: Some("project:/x".into()),
+                title: "A card".into(),
+                body: "Body.".into(),
+                links: vec![],
+                source_session: None,
+            })
+            .unwrap();
+
+        supersede(&memory, &[old]).unwrap();
+        assert!(memory.get(old).unwrap().archived);
+        assert!(supersede(&memory, &[card]).is_err());
+        assert!(supersede(&memory, &[9999]).is_err());
+    }
+
+    #[test]
+    fn titles_are_flattened_to_one_line() {
+        assert_eq!(single_line("A  title\nwith\tbreaks"), "A title with breaks");
     }
 }

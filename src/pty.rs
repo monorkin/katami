@@ -51,6 +51,11 @@ fn open_master() -> Result<OwnedFd> {
         bail!("could not open a pseudo-terminal: {}", last_error());
     }
     let master = unsafe { OwnedFd::from_raw_fd(fd) };
+    // Keep the master out of claude and every descendant it spawns — an
+    // inherited master keeps the pty half-open after the supervisor dies
+    if unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        bail!("could not mark the pty close-on-exec: {}", last_error());
+    }
     if unsafe { libc::grantpt(master.as_raw_fd()) } < 0 {
         bail!("grantpt failed: {}", last_error());
     }
@@ -124,7 +129,13 @@ pub fn install_signal_pipe() -> Result<OwnedFd> {
     let (read, write) = (fds[0], fds[1]);
     SIGNAL_PIPE_WRITE.store(write, std::sync::atomic::Ordering::SeqCst);
 
-    for signal in [libc::SIGWINCH, libc::SIGTERM, libc::SIGHUP] {
+    for signal in [
+        libc::SIGWINCH,
+        libc::SIGTERM,
+        libc::SIGHUP,
+        libc::SIGINT,
+        libc::SIGQUIT,
+    ] {
         let handler = forward_signal as *const () as libc::sighandler_t;
         if unsafe { libc::signal(signal, handler) } == libc::SIG_ERR {
             bail!("could not install the signal handler: {}", last_error());
@@ -136,11 +147,13 @@ pub fn install_signal_pipe() -> Result<OwnedFd> {
 static SIGNAL_PIPE_WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn forward_signal(signal: libc::c_int) {
+    let saved_errno = unsafe { *libc::__errno_location() };
     let fd = SIGNAL_PIPE_WRITE.load(std::sync::atomic::Ordering::SeqCst);
     if fd >= 0 {
         let byte = signal as u8;
         unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
     }
+    unsafe { *libc::__errno_location() = saved_errno };
 }
 
 pub fn is_terminal(fd: libc::c_int) -> bool {

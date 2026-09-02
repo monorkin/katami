@@ -82,13 +82,81 @@ pub fn run(config_dir: &Path) -> Result<()> {
     let thresholds = Thresholds::load();
 
     archive_unused_skills(&memory, &thresholds)?;
+    archive_stale_statuses(&memory)?;
+    archive_never_retrieved(&memory)?;
     reembed_missing(&memory)?;
     consolidate_entities(&memory, config_dir)?;
     cards::render_all(&memory, &paths::memory_dir().join("cards"))?;
+    sweep_files(&memory)?;
 
     memory.set_state("curator_last_run", &crate::timestamp())?;
     log("curated");
     Ok(())
+}
+
+/// A status snapshot nobody refreshed in two weeks is stale by definition —
+/// better silence than confidently wrong context.
+fn archive_stale_statuses(memory: &Memory) -> Result<()> {
+    for status in memory.list()?.iter().filter(|it| it.kind == "status") {
+        if days_since(&status.updated) > 14 {
+            memory.archive(status.id)?;
+            log(&format!("archived stale status for {}", status.entity.as_deref().unwrap_or("?")));
+        }
+    }
+    Ok(())
+}
+
+fn archive_never_retrieved(memory: &Memory) -> Result<()> {
+    for observation in memory.unretrieved_observations()? {
+        if days_since(&observation.updated) > 90 {
+            memory.archive(observation.id)?;
+            log(&format!("archived never-retrieved [[{}]]", observation.title));
+        }
+    }
+    Ok(())
+}
+
+/// The append-only leftovers: per-pid supervisor logs, overlays leaked by
+/// crashed launches, cursors for transcripts that no longer exist, and usage
+/// rows old enough to carry no signal.
+fn sweep_files(memory: &Memory) -> Result<()> {
+    remove_older_than(&paths::logs_dir(), "supervisor-", 30)?;
+    remove_older_than(&paths::overlays_dir(), "", 7)?;
+    memory.prune_cursors(|path| std::path::Path::new(path).exists())?;
+    memory.connection.execute(
+        "DELETE FROM usage WHERE used_at < ?1",
+        [days_ago_timestamp(180)],
+    )?;
+    Ok(())
+}
+
+fn remove_older_than(directory: &Path, prefix: &str, days: u64) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+        let age = entry
+            .metadata()
+            .and_then(|it| it.modified())
+            .ok()
+            .and_then(|it| it.elapsed().ok());
+        if age.is_some_and(|it| it.as_secs() > days * 86_400) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn days_ago_timestamp(days: u64) -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_secs()
+        .saturating_sub(days * 86_400);
+    crate::format_epoch_seconds(seconds)
 }
 
 fn archive_unused_skills(memory: &Memory, thresholds: &Thresholds) -> Result<()> {
@@ -148,13 +216,9 @@ fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
         bail!("the consolidation named observation ids that don't belong to {entity}");
     }
 
-    memory.connection.execute_batch("BEGIN IMMEDIATE")?;
-    let applied = apply(memory, entity, card.as_ref().map(|it| it.id), &consolidation);
-    match applied {
-        Ok(()) => memory.connection.execute_batch("COMMIT")?,
-        Err(_) => memory.connection.execute_batch("ROLLBACK")?,
-    }
-    applied
+    memory.with_transaction(|memory| {
+        apply(memory, entity, card.as_ref().map(|it| it.id), &consolidation)
+    })
 }
 
 fn apply(
@@ -248,7 +312,7 @@ fn log(message: &str) {
 
 const CONSOLIDATE_PROMPT: &str = r#"You maintain one entity card in a memory system. Stdin has the card's current body (possibly absent) and a list of dated observations about the same entity, each tagged [id N].
 
-Fold the observations into the card: merge duplicates, keep the newest version of contradicting facts, organize under these markdown sections — Identity, Preferences, Current state, History. Keep it tight; drop nothing that still matters, keep [[links]] that appear.
+Fold the observations into the card: merge duplicates, keep the newest version of contradicting facts, organize under these markdown sections — Identity, Preferences, History. Cards hold only durable material (they can be injected into any session); leave in-flight work status out entirely. Keep it tight; drop nothing that still matters, keep [[links]] that appear.
 
 Reply with ONLY this JSON, no prose:
 {"card_body":"the full updated card body in markdown","folded_ids":[1,2]}

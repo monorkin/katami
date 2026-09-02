@@ -39,7 +39,8 @@ pub fn config_dir_for(key: &str) -> Option<PathBuf> {
 }
 
 pub fn record(key: &str, config_dir: &Path) -> Result<()> {
-    let Some(_lock) = flock::try_acquire(&paths::data_dir().join("launches.lock"))? else {
+    let patience = std::time::Duration::from_secs(2);
+    let Some(_lock) = flock::acquire(&paths::data_dir().join("launches.lock"), patience)? else {
         return Ok(());
     };
 

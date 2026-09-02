@@ -34,11 +34,14 @@ pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
     let server = HookServer::start(launch_key)?;
     command.env(SOCKET_ENV_VAR, &server.socket_path);
 
+    // Raw mode comes first: if anything later fails, the guard's Drop still
+    // restores the terminal, and claude is never left orphaned behind a
+    // half-configured pty
+    let raw = RawGuard::enable()?;
     let mut pty = pty::spawn(command)?;
     let signal_pipe = pty::install_signal_pipe()?;
     pty::mirror_window_size(&pty.master)?;
 
-    let raw = RawGuard::enable()?;
     spawn_stdin_pump(&pty.master)?;
     pump_output(&pty.master, &signal_pipe, pty.child.id())?;
     drop(raw);
@@ -66,6 +69,10 @@ impl HookServer {
         let directory = paths::runtime_dir();
         std::fs::create_dir_all(&directory)
             .with_context(|| format!("could not create {}", directory.display()))?;
+        assert_private_directory(&directory)?;
+        thread::spawn(|| {
+            let _ = crate::embeddings::embed("warm up the model before the first prompt");
+        });
 
         let socket_path = directory.join(format!("{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket_path);
@@ -93,6 +100,30 @@ impl Drop for HookServer {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.socket_path);
     }
+}
+
+/// On sticky-bit /tmp another user can pre-create our fallback directory and
+/// swap the socket for their own — every hook would then relay the session to
+/// them. Refuse anything we don't exclusively own, the way tmux does.
+fn assert_private_directory(directory: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = std::fs::symlink_metadata(directory)
+        .with_context(|| format!("could not inspect {}", directory.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "{} is not a directory owned by this setup — remove it and relaunch",
+            directory.display()
+        );
+    }
+    if metadata.uid() != unsafe { libc::getuid() } {
+        anyhow::bail!(
+            "{} belongs to another user — remove it or set XDG_RUNTIME_DIR",
+            directory.display()
+        );
+    }
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 fn serve_connection(stream: UnixStream, context: &ServerContext) {
@@ -141,7 +172,8 @@ fn dispatch(request: &HookRequest) -> Result<Option<serde_json::Value>> {
 
 fn on_stop(request: &HookRequest, force: bool) -> Result<Option<serde_json::Value>> {
     if let Some(transcript) = request.payload["transcript_path"].as_str() {
-        reviewer::maybe_spawn(transcript, &request.config_dir, force)?;
+        let cwd = request.payload["cwd"].as_str();
+        reviewer::maybe_spawn(transcript, &request.config_dir, cwd, force)?;
     }
     if force {
         curator::maybe_spawn(&request.config_dir)?;
@@ -151,17 +183,28 @@ fn on_stop(request: &HookRequest, force: bool) -> Result<Option<serde_json::Valu
 
 fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> {
     let memory = Memory::open(&paths::memory_dir())?;
+    let all = memory.list()?;
+    let mut included: Vec<i64> = Vec::new();
     let mut sections = Vec::new();
 
     if let Some(cwd) = request.payload["cwd"].as_str() {
         let entity = cards::project_entity(Path::new(cwd));
-        for card in memory.list()? {
-            if card.kind == "card" && card.entity.as_deref() == Some(entity.as_str()) {
+        for card in all.iter().filter(|it| it.kind == "card") {
+            if card.entity.as_deref() == Some(entity.as_str()) {
+                included.push(card.id);
                 sections.push(format!("## {}\n{}", card.title, card.body.trim()));
             }
         }
+        if let Some(status) = memory.status_for_entity(&entity)? {
+            included.push(status.id);
+            sections.push(format!(
+                "## Current state (as of {} — may be stale)\n{}",
+                &status.updated[..10],
+                status.body.trim()
+            ));
+        }
     }
-    for pinned in memory.list()?.iter().filter(|it| it.pinned) {
+    for pinned in all.iter().filter(|it| it.pinned && !included.contains(&it.id)) {
         sections.push(format!("## {}\n{}", pinned.title, pinned.body.trim()));
     }
 
@@ -180,17 +223,26 @@ fn on_user_prompt(request: &HookRequest) -> Result<Option<serde_json::Value>> {
 
     let memory = Memory::open(&paths::memory_dir())?;
     let hits = search::hybrid(&memory, prompt, 5)?;
-    let session = request.payload["session_id"].as_str().unwrap_or("?");
-    for hit in &hits {
-        let stored = memory.get(hit.id)?;
-        memory.record_usage("memory", &stored.title, session)?;
-        log_line(&format!("injected [[{}]] for session={session}", stored.title));
-    }
+    let reply = search::compose_context(&memory, &hits)?
+        .map(|context| additional_context("UserPromptSubmit", &context));
 
-    match search::compose_context(&memory, &hits)? {
-        Some(context) => Ok(Some(additional_context("UserPromptSubmit", &context))),
-        None => Ok(None),
-    }
+    // Bookkeeping happens off the reply path — the hook client only waits
+    // 1500ms, and a reviewer holding the write lock must not eat that budget
+    let session = request.payload["session_id"].as_str().unwrap_or("?").to_string();
+    let titles: Vec<String> = hits
+        .iter()
+        .filter_map(|it| memory.get(it.id).ok().map(|stored| stored.title))
+        .collect();
+    thread::spawn(move || {
+        if let Ok(memory) = Memory::open(&paths::memory_dir()) {
+            for title in titles {
+                let _ = memory.record_usage("memory", &title, &session);
+                log_line(&format!("injected [[{title}]] for session={session}"));
+            }
+        }
+    });
+
+    Ok(reply)
 }
 
 fn on_post_tool_use(request: &HookRequest) -> Result<Option<serde_json::Value>> {
@@ -224,11 +276,14 @@ fn skill_read_from_path(path: &str) -> Option<String> {
     components.get(position + 1).map(|it| it.to_string())
 }
 
+/// Injected context is wrapped in sentinels so the transcript distiller can
+/// strip it back out — otherwise every injection echoes through the reviewer
+/// and the store slowly ingests its own output.
 fn additional_context(event: &str, context: &str) -> serde_json::Value {
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": event,
-            "additionalContext": context
+            "additionalContext": format!("<agent-memory>\n{context}\n</agent-memory>")
         }
     })
 }

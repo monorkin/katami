@@ -1,10 +1,11 @@
 //! `agent memory`: the human's window into the store — and a debugging
 //! surface for everything the hooks do silently.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::cards;
 use crate::embeddings;
+use crate::fsutil;
 use crate::memory::{Kind, Memory, NewObservation};
 use crate::paths;
 use crate::search;
@@ -105,6 +106,95 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+pub fn archive(id: i64) -> Result<()> {
+    let memory = open()?;
+    let stored = memory.get(id)?;
+    memory.archive(id)?;
+    println!("Archived {id}: {} — restore with `agent memory restore {id}`", stored.title);
+    Ok(())
+}
+
+pub fn restore(id: i64) -> Result<()> {
+    let memory = open()?;
+    memory.restore(id)?;
+    println!("Restored {id}: {}", memory.get(id)?.title);
+    Ok(())
+}
+
+pub fn edit(id: i64) -> Result<()> {
+    let memory = open()?;
+    let stored = memory.get(id)?;
+
+    let path = std::env::temp_dir().join(format!("agent-memory-{id}.md"));
+    fsutil::write_atomically(&path, &edit_buffer(&stored))?;
+    launch_editor(&path)?;
+    let edited = std::fs::read_to_string(&path)?;
+    let _ = std::fs::remove_file(&path);
+
+    let (title, entity, body) = parse_edit_buffer(&edited)?;
+    memory.update(id, &title, &body, entity.as_deref())?;
+    memory.replace_links(id, &cards::extract_links(&body))?;
+    embeddings::embed_into(&memory, id, &format!("{title}\n{body}"))?;
+    if stored.kind == "card" {
+        cards::render(&memory.get(id)?, &paths::memory_dir().join("cards"))?;
+    }
+    println!("Updated {id}: {title}");
+    Ok(())
+}
+
+fn edit_buffer(stored: &crate::memory::Stored) -> String {
+    let entity = stored.entity.as_deref().unwrap_or("");
+    format!("# {}\nentity: {entity}\n\n{}\n", stored.title, stored.body.trim_end())
+}
+
+fn parse_edit_buffer(contents: &str) -> Result<(String, Option<String>, String)> {
+    let mut lines = contents.lines();
+    let title = lines
+        .next()
+        .and_then(|it| it.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|it| !it.is_empty())
+        .context("the first line must be `# Title`")?
+        .to_string();
+
+    let mut entity = None;
+    let mut body_lines: Vec<&str> = Vec::new();
+    for line in lines {
+        if body_lines.is_empty() && entity.is_none()
+            && let Some(value) = line.strip_prefix("entity:")
+        {
+            let value = value.trim();
+            entity = Some(if value.is_empty() { String::new() } else { value.to_string() });
+            continue;
+        }
+        if body_lines.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        body_lines.push(line);
+    }
+
+    let body = body_lines.join("\n").trim_end().to_string();
+    if body.is_empty() {
+        anyhow::bail!("the body is empty — archive the memory instead of blanking it");
+    }
+    Ok((title, entity.filter(|it| !it.is_empty()), body))
+}
+
+fn launch_editor(path: &std::path::Path) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = std::process::Command::new(&editor)
+        .arg(path)
+        .status()
+        .with_context(|| format!("could not launch {editor} — set $EDITOR"))?;
+    if !status.success() {
+        anyhow::bail!("{editor} exited with {status}; the memory was not changed");
+    }
+    Ok(())
+}
+
 pub fn stats() -> Result<()> {
     let memory = open()?;
     let stats = memory.usage_stats()?;
@@ -125,4 +215,24 @@ pub fn stats() -> Result<()> {
 
 fn open() -> Result<Memory> {
     Memory::open(&paths::memory_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_buffers_round_trip() {
+        let buffer = "# New title\nentity: person:Kevin\n\nThe body.\nSecond line.\n";
+        let (title, entity, body) = parse_edit_buffer(buffer).unwrap();
+        assert_eq!(title, "New title");
+        assert_eq!(entity.as_deref(), Some("person:Kevin"));
+        assert_eq!(body, "The body.\nSecond line.");
+
+        let (_, entity, _) = parse_edit_buffer("# T\nentity:\n\nBody.\n").unwrap();
+        assert!(entity.is_none());
+
+        assert!(parse_edit_buffer("no heading\n\nBody.\n").is_err());
+        assert!(parse_edit_buffer("# T\nentity: x\n\n\n").is_err());
+    }
 }

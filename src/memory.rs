@@ -30,6 +30,7 @@ pub struct NewObservation {
 pub enum Kind {
     Observation,
     Card,
+    Status,
 }
 
 impl Kind {
@@ -37,6 +38,7 @@ impl Kind {
         match self {
             Kind::Observation => "observation",
             Kind::Card => "card",
+            Kind::Status => "status",
         }
     }
 }
@@ -91,13 +93,38 @@ impl Memory {
     }
 
     fn migrate(&self) -> Result<()> {
-        let version: i64 = self
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version >= 1 {
-            return Ok(());
-        }
+        // The version check and the schema creation share one write
+        // transaction — a supervisor and a freshly spawned reviewer can both
+        // open a brand-new store at the same moment
+        self.with_transaction(|memory| {
+            let version: i64 = memory
+                .connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if version >= 1 {
+                return Ok(());
+            }
+            memory.create_schema()
+        })
+    }
 
+    /// BEGIN IMMEDIATE around `work`; COMMIT on success, best-effort ROLLBACK
+    /// on failure so an error never strands an open transaction on the shared
+    /// connection.
+    pub fn with_transaction<T>(&self, work: impl FnOnce(&Memory) -> Result<T>) -> Result<T> {
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        match work(self) {
+            Ok(value) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn create_schema(&self) -> Result<()> {
         self.connection.execute_batch(
             "
             CREATE TABLE memories (
@@ -258,7 +285,7 @@ impl Memory {
         let mut statement = self.connection.prepare(
             "SELECT e.memory_id, e.vector FROM embeddings e
              JOIN memories m ON m.id = e.memory_id
-             WHERE e.model = ?1 AND m.archived = 0",
+             WHERE e.model = ?1 AND m.archived = 0 AND m.kind != 'status'",
         )?;
         let rows = statement.query_map([model], |row| {
             let id: i64 = row.get(0)?;
@@ -288,6 +315,58 @@ impl Memory {
              ORDER BY created ASC",
         )?;
         let rows = statement.query_map([entity], row_to_stored)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn status_for_entity(&self, entity: &str) -> Result<Option<Stored>> {
+        let status = self
+            .connection
+            .query_row(
+                "SELECT id, kind, entity, title, body, pinned, archived, updated
+                 FROM memories
+                 WHERE archived = 0 AND kind = 'status' AND entity = ?1",
+                [entity],
+                row_to_stored,
+            )
+            .ok();
+        Ok(status)
+    }
+
+    /// Status is overwrite-by-entity: one row per project, always the newest
+    /// picture, never accumulated.
+    pub fn upsert_status(&self, entity: &str, body: &str) -> Result<()> {
+        if let Some(existing) = self.status_for_entity(entity)? {
+            self.update_body(existing.id, body)
+        } else {
+            self.add(&NewObservation {
+                kind: Kind::Status,
+                entity: Some(entity.to_string()),
+                title: format!("Current state of {}", entity.split_once(':').map_or(entity, |it| it.1)),
+                body: body.to_string(),
+                links: Vec::new(),
+                source_session: None,
+            })
+            .map(|_| ())
+        }
+    }
+
+    pub fn recent_observations_for_entity(&self, entity: &str, limit: usize) -> Result<Vec<Stored>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, kind, entity, title, body, pinned, archived, updated
+             FROM memories
+             WHERE archived = 0 AND kind = 'observation' AND entity = ?1
+             ORDER BY created DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(rusqlite::params![entity, limit as i64], row_to_stored)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn entities(&self) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT entity FROM memories
+             WHERE archived = 0 AND entity IS NOT NULL ORDER BY entity",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -331,11 +410,39 @@ impl Memory {
         Ok(())
     }
 
+    pub fn restore(&self, id: i64) -> Result<()> {
+        self.connection.execute(
+            "UPDATE memories SET archived = 0, updated = ?2 WHERE id = ?1",
+            rusqlite::params![id, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update(&self, id: i64, title: &str, body: &str, entity: Option<&str>) -> Result<()> {
+        self.connection.execute(
+            "UPDATE memories SET title = ?2, body = ?3, entity = ?4, updated = ?5 WHERE id = ?1",
+            rusqlite::params![id, title, body, entity, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn replace_links(&self, id: i64, links: &[String]) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM links WHERE from_id = ?1", [id])?;
+        for title in links {
+            self.connection.execute(
+                "INSERT OR IGNORE INTO links (from_id, to_title) VALUES (?1, ?2)",
+                rusqlite::params![id, title],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn unembedded(&self, model: &str) -> Result<Vec<(i64, String)>> {
         let mut statement = self.connection.prepare(
             "SELECT m.id, m.title || char(10) || m.body FROM memories m
              LEFT JOIN embeddings e ON e.memory_id = m.id AND e.model = ?1
-             WHERE m.archived = 0 AND e.memory_id IS NULL",
+             WHERE m.archived = 0 AND m.kind != 'status' AND e.memory_id IS NULL",
         )?;
         let rows = statement.query_map([model], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -356,6 +463,35 @@ impl Memory {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Observations that were never once pulled into a session — candidates
+    /// for retirement once they're old enough.
+    pub fn unretrieved_observations(&self) -> Result<Vec<Stored>> {
+        let mut statement = self.connection.prepare(
+            "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated
+             FROM memories m
+             WHERE m.archived = 0 AND m.kind = 'observation' AND m.pinned = 0
+               AND NOT EXISTS (
+                 SELECT 1 FROM usage u WHERE u.kind = 'memory' AND u.name = m.title
+               )",
+        )?;
+        let rows = statement.query_map([], row_to_stored)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn prune_cursors(&self, keep: impl Fn(&str) -> bool) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT transcript_path FROM cursors")?;
+        let paths: Vec<String> = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for path in paths.iter().filter(|it| !keep(it)) {
+            self.connection
+                .execute("DELETE FROM cursors WHERE transcript_path = ?1", [path])?;
+        }
+        Ok(())
     }
 
     pub fn last_used(&self, kind: &str, name: &str) -> Result<Option<String>> {
@@ -507,6 +643,23 @@ mod tests {
         let neighbors_of_second = memory.neighbors(second).unwrap();
         assert_eq!(neighbors_of_second.len(), 1);
         assert_eq!(neighbors_of_second[0].title, "ax uses flocks");
+    }
+
+    #[test]
+    fn status_is_one_overwritten_row_per_entity() {
+        let memory = Memory::open_in_memory().unwrap();
+        memory.upsert_status("project:/x", "PR 1 open.").unwrap();
+        memory.upsert_status("project:/x", "PR 1 merged, PR 2 open.").unwrap();
+
+        let status = memory.status_for_entity("project:/x").unwrap().unwrap();
+        assert_eq!(status.body, "PR 1 merged, PR 2 open.");
+        let statuses: Vec<_> = memory
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|it| it.kind == "status")
+            .collect();
+        assert_eq!(statuses.len(), 1);
     }
 
     #[test]
