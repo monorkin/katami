@@ -31,15 +31,21 @@ katami memory pull-models   # ~30MB, enables semantic search
 
 ## Usage
 
-```bash
-katami                                    # wrap a plain claude session
-katami -- --model opus                    # forward args to the tool
-katami --cmd codex                        # wrap codex instead
-katami --cmd pi                           # or pi
-katami --cmd opencode                     # or opencode
-katami --cmd "ax run --account work --"   # wrap another launcher (ends in claude)
-katami --exec --                          # skip the supervisor entirely
+Everything after `katami` is the command to wrap — the first word picks the
+tool, the rest is passed to it verbatim:
 
+```bash
+katami claude                             # wrap a claude session
+katami claude --model opus                # forward args to claude
+katami codex                              # wrap codex
+katami pi                                 # or pi
+katami opencode                           # or opencode
+katami ax --account private -- --dangerously-skip-permissions   # any launcher that ends in claude
+```
+
+Run `katami` with no command to see the help. The rest are subcommands:
+
+```bash
 katami memory list                        # what it has learned
 katami memory search "deploy process"     # hybrid BM25 + semantic search
 katami memory show 12                     # one memory with its [[links]]
@@ -53,9 +59,6 @@ katami relays status                      # show each relay's state
 
 katami shell-completion install zsh       # bash, elvish, zsh, fish, nu, or powershell
 ```
-
-`--cmd` is split on whitespace — no shell quoting. Wrap anything fancier in a
-script. (`--claude-cmd` is a deprecated alias.)
 
 ### Wrapping codex, pi, and opencode
 
@@ -113,7 +116,8 @@ Two tool-specific notes:
 ## Building
 
 ```bash
-cargo build --release   # → target/release/katami
+cargo build --release              # → target/release/katami
+sudo make install                  # → /usr/bin/katami
 ```
 
 Static musl release builds (`make build-all`, used by `make release`) need

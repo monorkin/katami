@@ -33,22 +33,17 @@ use usage::{Cli, Subcommands};
 
 /// Supervisor for coding agents: wraps a launch and learns from the session
 #[derive(Cli)]
-#[usage(bin = "katami", version, unknown_flags = "error", completion)]
+#[usage(
+    bin = "katami",
+    version,
+    unknown_flags = "error",
+    completion,
+    arg_required_else_help,
+    after_help = "Wrap a tool by running it after katami:\n  katami claude\n  katami codex\n  katami ax --account private -- --dangerously-skip-permissions"
+)]
 struct Cli {
-    /// Command used to launch the coding tool, split on whitespace
-    #[usage(long, default = "claude")]
-    cmd: String,
-    /// Deprecated alias for --cmd
-    #[usage(long, hide = true)]
-    claude_cmd: Option<String>,
-    /// Launch directly without the supervisor
-    #[usage(long)]
-    exec: bool,
-    /// Arguments forwarded to the coding tool
-    #[usage(double_dash = "required")]
-    claude_args: Vec<String>,
     #[usage(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommands)]
@@ -176,30 +171,54 @@ enum ShellCompletionCommand {
     },
 }
 
+/// The reserved words that name a katami subcommand rather than a coding tool
+/// to supervise. Anything else in the first position is a launcher.
+const SUBCOMMANDS: [&str; 8] = [
+    "hook",
+    "review",
+    "relays",
+    "curate",
+    "log",
+    "memory",
+    "shell-completion",
+    "help",
+];
+
 fn main() {
-    if let Err(error) = run(Cli::parse()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.first() {
+        Some(first) if is_launcher(first) => launch::run(&args),
+        _ => run(Cli::parse()),
+    };
+    if let Err(error) = result {
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
 }
 
+/// The first word is a launcher to supervise unless it's a flag (`-`/`--`), a
+/// usage-rs internal (`__complete_word__`), or a reserved subcommand.
+fn is_launcher(word: &str) -> bool {
+    !word.starts_with('-') && !word.starts_with('_') && !SUBCOMMANDS.contains(&word)
+}
+
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Some(Command::Hook { tool, event }) => run_hook(&tool, event.as_deref()),
-        Some(Command::Review {
+        Command::Hook { tool, event } => run_hook(&tool, event.as_deref()),
+        Command::Review {
             tool,
             transcript,
             session,
             config_dir,
             cwd,
-        }) => run_review(&tool, transcript, session, &config_dir, cwd.as_deref()),
-        Some(Command::Relays { command }) => match command {
+        } => run_review(&tool, transcript, session, &config_dir, cwd.as_deref()),
+        Command::Relays { command } => match command {
             RelaysCommand::Install => relays::install_command(),
             RelaysCommand::Status => relays::status_command(),
         },
-        Some(Command::Curate { config_dir }) => curator::run(&config_dir),
-        Some(Command::Log { lines, follow }) => log_cli::print(lines, follow),
-        Some(Command::Memory { command }) => match command {
+        Command::Curate { config_dir } => curator::run(&config_dir),
+        Command::Log { lines, follow } => log_cli::print(lines, follow),
+        Command::Memory { command } => match command {
             MemoryCommand::Add {
                 title,
                 body,
@@ -228,21 +247,17 @@ fn run(cli: Cli) -> Result<()> {
             MemoryCommand::PullModels => embeddings::pull(),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),
         },
-        Some(Command::ShellCompletion { command }) => match command {
+        Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
             ShellCompletionCommand::Install { shell } => completions::install(&shell),
         },
-        None => {
-            // The old flag wins when both are given, so existing scripts keep working
-            let cmd = cli.claude_cmd.unwrap_or(cli.cmd);
-            launch::run(&cmd, &cli.claude_args, cli.exec)
-        }
     }
 }
 
 fn run_hook(tool: &str, event: Option<&str>) -> Result<()> {
-    // Back-compat: an overlay from before the rename says `katami hook <Event>`,
-    // so a lone positional is the event and the tool is claude.
+    // claude's settings overlay registers `katami hook <Event>` with no tool,
+    // so a lone positional is the event and the tool is claude. codex names
+    // both: `katami hook codex <Event>`.
     let (tool, event) = match event {
         Some(event) => (hook_protocol::Tool::parse(tool).unwrap_or_default(), event),
         None => (hook_protocol::Tool::Claude, tool),

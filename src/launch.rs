@@ -1,9 +1,8 @@
 //! Composing and launching the wrapped coding tool.
 //!
-//! `--cmd` names the launcher — a bare `claude`, `codex`, `pi`, `opencode`, or
-//! a wrapper like `ax run --account work --` — split on whitespace, so shell
-//! quoting isn't interpreted and anything fancier belongs in a wrapper script.
-//! Forwarded arguments after `--` are appended verbatim.
+//! The command is whatever follows `katami` — a bare `claude`, `codex`, `pi`,
+//! `opencode`, or a wrapper like `ax --account work -- --dangerously-skip-permissions`.
+//! The first word is the program; the rest are its arguments, passed verbatim.
 //!
 //! Every launch first installs the relays into codex, pi, and opencode, so a
 //! session that shells out to another tool mid-run relays to this same
@@ -11,7 +10,6 @@
 //! materialization; the others carry their integration in their relays.
 
 use anyhow::{Context, Result, bail};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -25,31 +23,27 @@ use crate::relays;
 use crate::supervisor;
 use crate::virtual_skills;
 
-pub fn run(cmd: &str, claude_args: &[String], exec: bool) -> Result<()> {
+pub fn run(command: &[String]) -> Result<()> {
     let _ = relays::install_all();
 
-    if exec {
-        let mut command = compose(cmd, claude_args.to_vec())?;
-        return Err(command.exec())
-            .with_context(|| format!("could not launch {cmd} — is it on your PATH?"));
-    }
-
-    let launch_key = launches::key(&std::env::current_dir()?, cmd);
-    let mut forwarded = claude_args.to_vec();
+    let launch_key = launches::key(&std::env::current_dir()?, &command.join(" "));
+    let mut args: Vec<String> = command[1..].to_vec();
     let mut overlay_path = None;
 
-    if wraps_claude(cmd) {
-        let (args, user_settings) = extract_user_settings(claude_args)?;
+    if wraps_claude(command) {
+        let (rest, user_settings) = extract_user_settings(&args)?;
         let path = overlay::write(user_settings.as_deref())?;
-        forwarded = args;
-        forwarded.push("--settings".into());
-        forwarded.push(path.display().to_string());
-        materialize_skills(cmd, &launch_key);
+        // Appended at the very end so a wrapper like `ax … -- …` lands it past
+        // the final `--`, where claude's own args live.
+        args = rest;
+        args.push("--settings".into());
+        args.push(path.display().to_string());
+        materialize_skills(command, &launch_key);
         overlay_path = Some(path);
     }
 
-    let command = compose(cmd, forwarded)?;
-    let code = supervise_or_pipe(command, cmd, launch_key);
+    let composed = compose(&command[0], &args)?;
+    let code = supervise_or_pipe(composed, &command[0], launch_key);
 
     if let Some(path) = &overlay_path {
         overlay::remove(path);
@@ -57,7 +51,7 @@ pub fn run(cmd: &str, claude_args: &[String], exec: bool) -> Result<()> {
     std::process::exit(code?);
 }
 
-fn supervise_or_pipe(mut command: Command, cmd: &str, launch_key: String) -> Result<i32> {
+fn supervise_or_pipe(mut command: Command, program: &str, launch_key: String) -> Result<i32> {
     if pty::is_terminal(libc::STDIN_FILENO) && pty::is_terminal(libc::STDOUT_FILENO) {
         supervisor::supervise(command, launch_key)
     } else {
@@ -67,36 +61,35 @@ fn supervise_or_pipe(mut command: Command, cmd: &str, launch_key: String) -> Res
         command.env_remove(crate::hook_protocol::SOCKET_ENV_VAR);
         let status = command
             .status()
-            .with_context(|| format!("could not launch {cmd} — is it on your PATH?"))?;
+            .with_context(|| format!("could not launch {program} — is it on your PATH?"))?;
         Ok(exit_code(&status))
     }
 }
 
 /// The settings overlay is a claude feature, so it's only for a claude launch.
-/// A wrapper like `ax run --` ends in claude; only an explicit codex/pi/
-/// opencode command is not claude.
-fn wraps_claude(cmd: &str) -> bool {
-    !cmd.split_whitespace()
+/// A wrapper like `ax … --` ends in claude; only an explicit codex/pi/opencode
+/// command is not claude.
+fn wraps_claude(command: &[String]) -> bool {
+    !command
+        .iter()
         .any(|word| matches!(Tool::parse(word), Some(tool) if tool != Tool::Claude))
 }
 
-fn compose(claude_cmd: &str, claude_args: Vec<String>) -> Result<Command> {
-    let mut words = claude_cmd.split_whitespace();
-    let Some(program) = words.next() else {
-        bail!("--claude-cmd is empty — give it a command like \"claude\" or \"ax run --\"");
-    };
-
+fn compose(program: &str, args: &[String]) -> Result<Command> {
+    if program.is_empty() {
+        bail!("no command given — try `katami claude` or `katami codex`");
+    }
     let mut command = Command::new(program);
-    command.args(words).args(claude_args);
+    command.args(args);
     Ok(command)
 }
 
 /// A plain `claude` launch reveals its config dir up front; a wrapper like
-/// `ax run` only reveals it through hook frames, so those launches use the
-/// dir recorded last time under the same key. First-ever launches skip
+/// `ax …` only reveals it through hook frames, so those launches use the dir
+/// recorded last time under the same key. First-ever launches skip
 /// materialization — the skills appear from the second session on.
-fn materialize_skills(claude_cmd: &str, launch_key: &str) {
-    let config_dir = if claude_cmd.split_whitespace().next() == Some("claude") {
+fn materialize_skills(command: &[String], launch_key: &str) {
+    let config_dir = if command.first().map(String::as_str) == Some("claude") {
         Some(paths::claude_config_home())
     } else {
         launches::config_dir_for(launch_key)
@@ -111,12 +104,12 @@ fn materialize_skills(claude_cmd: &str, launch_key: &str) {
     }
 }
 
-/// A `--settings` the user forwarded themselves gets folded into our overlay,
+/// A `--settings` the user passed themselves gets folded into our overlay,
 /// since claude's behavior for a repeated flag is undocumented.
-fn extract_user_settings(claude_args: &[String]) -> Result<(Vec<String>, Option<PathBuf>)> {
+fn extract_user_settings(args: &[String]) -> Result<(Vec<String>, Option<PathBuf>)> {
     let mut remaining = Vec::new();
     let mut settings = None;
-    let mut arguments = claude_args.iter();
+    let mut arguments = args.iter();
 
     while let Some(argument) = arguments.next() {
         if argument == "--settings" {
@@ -165,5 +158,13 @@ mod tests {
         assert_eq!(settings, Some(PathBuf::from("/tmp/mine.json")));
 
         assert!(extract_user_settings(&["--settings".into()]).is_err());
+    }
+
+    #[test]
+    fn wraps_claude_detects_the_launcher() {
+        assert!(wraps_claude(&["claude".into()]));
+        assert!(wraps_claude(&["ax".into(), "--account".into(), "work".into(), "--".into()]));
+        assert!(!wraps_claude(&["codex".into()]));
+        assert!(!wraps_claude(&["pi".into(), "--mode".into(), "json".into()]));
     }
 }
