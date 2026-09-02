@@ -24,6 +24,7 @@ use crate::supervisor;
 use crate::virtual_skills;
 
 pub fn run(command: &[String]) -> Result<()> {
+    reveal_tool_to_herdr(command)?;
     let _ = relays::install_all();
 
     let launch_key = launches::key(&std::env::current_dir()?, &command.join(" "));
@@ -51,6 +52,26 @@ pub fn run(command: &[String]) -> Result<()> {
     std::process::exit(code?);
 }
 
+/// Herdr identifies an agent by the pane's foreground process, and under
+/// katami that's us — the tool lives on our inner PTY where herdr can't see
+/// it. Its escape hatch for wrappers is a `HERDR_AGENT` hint read from the
+/// foreground process's initial environment, so it has to be there before
+/// we start: re-exec with it set.
+fn reveal_tool_to_herdr(command: &[String]) -> Result<()> {
+    let inside_herdr = std::env::var_os("HERDR_ENV").is_some_and(|it| it == "1");
+    if !inside_herdr || std::env::var_os("HERDR_AGENT").is_some() {
+        return Ok(());
+    }
+
+    use std::os::unix::process::CommandExt;
+    let katami = std::env::current_exe().context("could not determine the katami binary path")?;
+    let error = Command::new(katami)
+        .args(std::env::args_os().skip(1))
+        .env("HERDR_AGENT", wrapped_tool(command).as_str())
+        .exec();
+    Err(error).context("could not relaunch katami with the herdr agent hint")
+}
+
 fn supervise_or_pipe(mut command: Command, program: &str, launch_key: String) -> Result<i32> {
     if pty::is_terminal(libc::STDIN_FILENO) && pty::is_terminal(libc::STDOUT_FILENO) {
         supervisor::supervise(command, launch_key)
@@ -70,9 +91,11 @@ fn supervise_or_pipe(mut command: Command, program: &str, launch_key: String) ->
 /// A wrapper like `ax … --` ends in claude; only an explicit codex/pi/opencode
 /// command is not claude.
 fn wraps_claude(command: &[String]) -> bool {
-    !command
-        .iter()
-        .any(|word| matches!(Tool::parse(word), Some(tool) if tool != Tool::Claude))
+    wrapped_tool(command) == Tool::Claude
+}
+
+fn wrapped_tool(command: &[String]) -> Tool {
+    command.iter().find_map(|word| Tool::parse(word)).unwrap_or_default()
 }
 
 fn compose(program: &str, args: &[String]) -> Result<Command> {
@@ -166,5 +189,7 @@ mod tests {
         assert!(wraps_claude(&["ax".into(), "--account".into(), "work".into(), "--".into()]));
         assert!(!wraps_claude(&["codex".into()]));
         assert!(!wraps_claude(&["pi".into(), "--mode".into(), "json".into()]));
+        assert_eq!(wrapped_tool(&["ax".into(), "run".into(), "--".into()]), Tool::Claude);
+        assert_eq!(wrapped_tool(&["opencode".into()]), Tool::Opencode);
     }
 }
