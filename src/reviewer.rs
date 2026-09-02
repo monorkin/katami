@@ -68,7 +68,8 @@ struct Observation {
 
 #[derive(Deserialize)]
 struct StatusChange {
-    op: String,
+    #[serde(default)]
+    op: Option<String>,
     #[serde(default)]
     body: Option<String>,
 }
@@ -497,25 +498,35 @@ fn assert_changeable(memory: &Memory, id: i64, shown_ids: &[i64]) -> Result<()> 
 }
 
 fn apply_status(memory: &Memory, entity: &str, status: &StatusChange) -> Result<()> {
-    match status.op.as_str() {
-        "replace" => {
+    match status.op.as_deref() {
+        Some("replace") => {
             let body = status
                 .body
                 .as_deref()
                 .context("a status replace carried no body")?;
-            if !body.trim().is_empty() {
-                memory.upsert_status(entity, body)?;
+            replace_status(memory, entity, body)
+        }
+        None => {
+            if let Some(body) = status.body.as_deref() {
+                replace_status(memory, entity, body)?;
             }
             Ok(())
         }
-        "clear" => {
+        Some("clear") => {
             if let Some(current) = memory.status_for_entity(entity)? {
                 memory.archive(current.id, "completed_status")?;
             }
             Ok(())
         }
-        other => anyhow::bail!("unknown status op '{other}' — expected replace or clear"),
+        Some(other) => anyhow::bail!("unknown status op '{other}' — expected replace or clear"),
     }
+}
+
+fn replace_status(memory: &Memory, entity: &str, body: &str) -> Result<()> {
+    if !body.trim().is_empty() {
+        memory.upsert_status(entity, body)?;
+    }
+    Ok(())
 }
 
 /// Skill names become directory names under the claude config dir — anything
@@ -613,6 +624,27 @@ mod tests {
         assert!(review.retracts.is_empty());
 
         assert!(serde_json::from_str::<Review>(r#"{"observations":[{"title":"t","body":"b"}]}"#).is_err());
+    }
+
+    #[test]
+    fn status_without_an_op_is_tolerated() {
+        let memory = Memory::open_in_memory().unwrap();
+        let entity = "project:katami";
+
+        let bodiless: Review = serde_json::from_str(r#"{"status":{}}"#).unwrap();
+        apply_status(&memory, entity, bodiless.status.as_ref().unwrap()).unwrap();
+        assert!(memory.status_for_entity(entity).unwrap().is_none());
+
+        let implied: Review = serde_json::from_str(r#"{"status":{"body":"PR 12 open"}}"#).unwrap();
+        apply_status(&memory, entity, implied.status.as_ref().unwrap()).unwrap();
+        assert_eq!(memory.status_for_entity(entity).unwrap().unwrap().body, "PR 12 open");
+
+        let cleared: Review = serde_json::from_str(r#"{"status":{"op":"clear"}}"#).unwrap();
+        apply_status(&memory, entity, cleared.status.as_ref().unwrap()).unwrap();
+        assert!(memory.status_for_entity(entity).unwrap().is_none());
+
+        let bogus: Review = serde_json::from_str(r#"{"status":{"op":"nuke"}}"#).unwrap();
+        assert!(apply_status(&memory, entity, bogus.status.as_ref().unwrap()).is_err());
     }
 
     #[test]
