@@ -36,14 +36,14 @@ fn archive_skills_after_days() -> u64 {
 
 pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
     let memory = Memory::open(&paths::memory_dir())?;
-    // At most one automatic run per calendar day; `agent memory curate` is always manual
+    // At most one automatic run per calendar day; `katami memory curate` is always manual
     if let Some(last_run) = memory.state("curator_last_run")?
         && clock::days_since(&last_run) == 0
     {
         return Ok(());
     }
 
-    let agent = std::env::current_exe().context("could not determine the agent binary path")?;
+    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
     let mut command = Command::new(agent);
     command
         .args(["curate", "--config-dir"])
@@ -154,7 +154,7 @@ fn archive_unused_skills(memory: &Memory) -> Result<()> {
     let archive_after = archive_skills_after_days();
     for skill in memory.generated_skills()? {
         let last_activity = memory
-            .last_used("skill", &format!("agent-{}", skill.name))?
+            .last_used("skill", &format!("katami-{}", skill.name))?
             .unwrap_or(skill.created.clone());
         if clock::days_since(&last_activity) > archive_after {
             memory.archive_generated_skill(&skill.name)?;

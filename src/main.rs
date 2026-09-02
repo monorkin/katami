@@ -33,7 +33,7 @@ use usage::{Cli, Subcommands};
 
 /// Supervisor for coding agents: wraps a launch and learns from the session
 #[derive(Cli)]
-#[usage(bin = "agent", version, unknown_flags = "error", completion)]
+#[usage(bin = "katami", version, unknown_flags = "error", completion)]
 struct Cli {
     /// Command used to launch the coding tool, split on whitespace
     #[usage(long, default = "claude")]
@@ -241,7 +241,7 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn run_hook(tool: &str, event: Option<&str>) -> Result<()> {
-    // Back-compat: an overlay from before the rename says `agent hook <Event>`,
+    // Back-compat: an overlay from before the rename says `katami hook <Event>`,
     // so a lone positional is the event and the tool is claude.
     let (tool, event) = match event {
         Some(event) => (hook_protocol::Tool::parse(tool).unwrap_or_default(), event),

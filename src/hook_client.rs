@@ -1,4 +1,4 @@
-//! `agent hook <tool> <event>`: the thin client claude and codex run.
+//! `katami hook <tool> <event>`: the thin client claude and codex run.
 //!
 //! It relays: hook JSON from stdin to the supervisor's socket, and the
 //! supervisor's canonical reply back out — formatted into the tool's native
@@ -52,7 +52,7 @@ fn relay(tool: Tool, event: &str) -> Result<serde_json::Value> {
 
 /// Turns the canonical `{"context": ...}` reply into the tool's native shape.
 /// An empty or absent context becomes `{}` — nothing to inject. Claude wraps
-/// the context in `<agent-memory>` sentinels so its transcript parser can
+/// the context in `<katami-memory>` sentinels so its transcript parser can
 /// strip its own injection back out; codex needs no sentinel because its
 /// parser filters injected context structurally by role and kind.
 fn format_reply(tool: Tool, event: &str, reply: &serde_json::Value) -> serde_json::Value {
@@ -60,7 +60,7 @@ fn format_reply(tool: Tool, event: &str, reply: &serde_json::Value) -> serde_jso
         return serde_json::json!({});
     };
     let context = match tool {
-        Tool::Claude => format!("<agent-memory>\n{context}\n</agent-memory>"),
+        Tool::Claude => format!("<katami-memory>\n{context}\n</katami-memory>"),
         _ => context.to_string(),
     };
     serde_json::json!({
@@ -80,7 +80,7 @@ mod tests {
         let reply = serde_json::json!({ "context": "a memory" });
         let out = format_reply(Tool::Claude, "UserPromptSubmit", &reply);
         let injected = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        assert!(injected.starts_with("<agent-memory>"));
+        assert!(injected.starts_with("<katami-memory>"));
         assert!(injected.contains("a memory"));
     }
 

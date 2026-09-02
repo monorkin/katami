@@ -434,7 +434,7 @@ impl Memory {
                 [id],
                 row_to_stored,
             )
-            .with_context(|| format!("no memory with id {id} — see `agent memory list`"))
+            .with_context(|| format!("no memory with id {id} — see `katami memory list`"))
     }
 
     pub fn list(&self) -> Result<Vec<Stored>> {

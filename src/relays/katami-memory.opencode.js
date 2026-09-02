@@ -1,13 +1,13 @@
 // installed by agent — managed file; edits are overwritten on the next launch.
-// AGENT_RELAY_VERSION=1
+// KATAMI_RELAY_VERSION=1
 //
 // Relays opencode chat events to the agent supervisor over its unix socket and
 // injects the memories it returns as synthetic message parts. Inert unless
-// AGENT_HOOK_SOCKET is set.
+// KATAMI_HOOK_SOCKET is set.
 
 import net from "node:net";
 
-const socketPath = process.env.AGENT_HOOK_SOCKET;
+const socketPath = process.env.KATAMI_HOOK_SOCKET;
 
 function ask(event, payload, timeoutMs = 1500) {
   if (!socketPath) return Promise.resolve(null);
@@ -75,7 +75,7 @@ export const AgentMemoryPlugin = async ({ directory }) => {
           type: "text",
           text,
           synthetic: true,
-          metadata: { agentMemory: true },
+          metadata: { katamiMemory: true },
         });
       }
     },

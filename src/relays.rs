@@ -3,9 +3,9 @@
 //! Every tool gets its relay written into its global config once, at launch
 //! and on demand — persistent, not per-session, because a supervised session
 //! can shell out to another tool mid-run and that inner tool must relay to the
-//! same supervisor. The relays gate on `AGENT_HOOK_SOCKET`, so an installed
+//! same supervisor. The relays gate on `KATAMI_HOOK_SOCKET`, so an installed
 //! relay is inert outside a supervised session. Everything is additive and
-//! marked as agent-managed: pi and opencode get one materialized file each,
+//! marked as katami-managed: pi and opencode get one materialized file each,
 //! codex gets our hook entries merged into its `hooks.json` with the user's
 //! own entries preserved.
 
@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use crate::fsutil;
 use crate::paths;
 
-const PI_RELAY: &str = include_str!("relays/agent-memory.pi.ts");
-const OPENCODE_RELAY: &str = include_str!("relays/agent-memory.opencode.js");
+const PI_RELAY: &str = include_str!("relays/katami-memory.pi.ts");
+const OPENCODE_RELAY: &str = include_str!("relays/katami-memory.opencode.js");
 
 /// The codex hook events we register (no PostToolUse — skill tracking is a
 /// claude-only concept) and their timeouts in seconds. SessionEnd's hard cap
@@ -39,23 +39,23 @@ pub struct Installed {
 /// codex's hooks changed — codex skips untrusted hooks until the user runs
 /// `/hooks` once.
 pub fn install_all() -> Result<()> {
-    let agent = std::env::current_exe().context("could not determine the agent binary path")?;
+    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
     let installed = install(&agent)?;
     if installed.iter().any(|it| it.tool == "codex" && it.changed) {
         eprintln!(
-            "note: codex memory hooks were installed — run `/hooks` inside codex once and trust the agent entries, or they stay skipped."
+            "note: codex memory hooks were installed — run `/hooks` inside codex once and trust the katami entries, or they stay skipped."
         );
     }
     Ok(())
 }
 
 pub fn install_command() -> Result<()> {
-    let agent = std::env::current_exe().context("could not determine the agent binary path")?;
+    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
     for entry in install(&agent)? {
         let state = if entry.changed { "installed" } else { "already current" };
         println!("{:<9} {state:<16} {}", entry.tool, entry.path.display());
     }
-    println!("\nIf codex was updated, run `/hooks` inside codex once to trust the agent entries.");
+    println!("\nIf codex was updated, run `/hooks` inside codex once to trust the katami entries.");
     Ok(())
 }
 
@@ -138,7 +138,7 @@ fn is_agent_group(group: &Value) -> bool {
 }
 
 fn current_states() -> Result<Vec<(&'static str, PathBuf, bool)>> {
-    let agent = std::env::current_exe().context("could not determine the agent binary path")?;
+    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
     let pi = pi_path();
     let opencode = opencode_path();
     let codex = codex_hooks_path();
@@ -167,11 +167,11 @@ fn pi_contents() -> String {
 }
 
 fn pi_path() -> PathBuf {
-    paths::pi_extensions_dir().join("agent-memory.ts")
+    paths::pi_extensions_dir().join("katami-memory.ts")
 }
 
 fn opencode_path() -> PathBuf {
-    paths::opencode_plugins_dir().join("agent-memory.js")
+    paths::opencode_plugins_dir().join("katami-memory.js")
 }
 
 fn codex_hooks_path() -> PathBuf {

@@ -1,12 +1,12 @@
 //! Materializing generated skills into a claude config dir.
 //!
 //! Skills the reviewer proposed live as rows in the store; before each launch
-//! they're rendered into `<config_dir>/skills/agent-<name>/SKILL.md` so the
-//! session can invoke them. The sync is one-way and owns only the `agent-`
+//! they're rendered into `<config_dir>/skills/katami-<name>/SKILL.md` so the
+//! session can invoke them. The sync is one-way and owns only the `katami-`
 //! prefix: entries for skills that were archived disappear, everything the
 //! user put there themselves is never touched. A skills dir that is itself a
 //! symlink is skipped entirely — it points at a directory shared with other
-//! setups, and agent doesn't write into shared territory.
+//! setups, and katami doesn't write into shared territory.
 
 use anyhow::Result;
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::path::Path;
 use crate::fsutil;
 use crate::memory::Memory;
 
-const PREFIX: &str = "agent-";
+const PREFIX: &str = "katami-";
 
 pub fn materialize(memory: &Memory, config_dir: &Path) -> Result<()> {
     let skills_dir = config_dir.join("skills");
@@ -91,7 +91,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&config_dir);
         let skills_dir = config_dir.join("skills");
         std::fs::create_dir_all(skills_dir.join("users-own-skill")).unwrap();
-        std::fs::create_dir_all(skills_dir.join("agent-stale")).unwrap();
+        std::fs::create_dir_all(skills_dir.join("katami-stale")).unwrap();
 
         let memory = Memory::open_in_memory().unwrap();
         memory
@@ -101,11 +101,11 @@ mod tests {
         materialize(&memory, &config_dir).unwrap();
 
         let rendered =
-            std::fs::read_to_string(skills_dir.join("agent-deploy-check/SKILL.md")).unwrap();
-        assert!(rendered.contains("name: agent-deploy-check"));
+            std::fs::read_to_string(skills_dir.join("katami-deploy-check/SKILL.md")).unwrap();
+        assert!(rendered.contains("name: katami-deploy-check"));
         assert!(rendered.contains("1. Check the logs."));
         assert!(skills_dir.join("users-own-skill").exists());
-        assert!(!skills_dir.join("agent-stale").exists());
+        assert!(!skills_dir.join("katami-stale").exists());
 
         std::fs::remove_dir_all(&config_dir).unwrap();
     }

@@ -9,22 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "libc",
- "model2vec-rs",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "ureq",
- "usage-rs",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,6 +725,22 @@ checksum = "0e0c1080212aad755ea003d18543e8768dd432c48819efd73a7bf1e39b7a5a3a"
 dependencies = [
  "cfg-if",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "katami"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "libc",
+ "model2vec-rs",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "ureq",
+ "usage-rs",
 ]
 
 [[package]]

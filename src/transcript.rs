@@ -152,8 +152,8 @@ fn claude_turn_from(record: &Value) -> Option<Turn> {
 /// reviewer and the store would slowly ingest its own output — so the
 /// sentinel-wrapped spans are cut before distillation.
 fn strip_injected(text: &str) -> String {
-    const OPEN: &str = "<agent-memory>";
-    const CLOSE: &str = "</agent-memory>";
+    const OPEN: &str = "<katami-memory>";
+    const CLOSE: &str = "</katami-memory>";
 
     let mut remaining = text;
     let mut stripped = String::new();
@@ -280,10 +280,10 @@ mod tests {
     #[test]
     fn injected_memory_spans_are_stripped() {
         assert_eq!(
-            strip_injected("before <agent-memory>\ninjected stuff\n</agent-memory> after"),
+            strip_injected("before <katami-memory>\ninjected stuff\n</katami-memory> after"),
             "before  after"
         );
-        assert_eq!(strip_injected("<agent-memory>all of it"), "");
+        assert_eq!(strip_injected("<katami-memory>all of it"), "");
         assert_eq!(strip_injected("untouched"), "untouched");
     }
 }

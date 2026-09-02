@@ -21,7 +21,7 @@ use std::path::PathBuf;
 /// Where a relay finds the supervisor's socket — part of the wire contract,
 /// and doubling as the recursion guard and the arming gate: a process without
 /// it (a headless reviewer run, an unsupervised session) relays nothing.
-pub const SOCKET_ENV_VAR: &str = "AGENT_HOOK_SOCKET";
+pub const SOCKET_ENV_VAR: &str = "KATAMI_HOOK_SOCKET";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default, Debug)]
 #[serde(rename_all = "lowercase")]

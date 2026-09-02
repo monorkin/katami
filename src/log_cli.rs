@@ -1,4 +1,4 @@
-//! `agent log`: what the supervisor, reviewer, and curator have been doing.
+//! `katami log`: what the supervisor, reviewer, and curator have been doing.
 //!
 //! Each of them appends timestamped lines to its own file under the logs
 //! directory; this merges them into one chronological stream so nobody has

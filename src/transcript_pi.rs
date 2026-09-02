@@ -49,7 +49,7 @@ mod tests {
     fn skips_header_and_injected_custom_messages() {
         let header = record(r#"{"type":"session","version":3,"cwd":"/x"}"#);
         let injected = record(
-            r#"{"type":"custom_message","message":{"customType":"agent-memory","content":"injected"}}"#,
+            r#"{"type":"custom_message","message":{"customType":"katami-memory","content":"injected"}}"#,
         );
         assert!(turn_from(&header).is_none());
         assert!(turn_from(&injected).is_none());

@@ -1,14 +1,14 @@
 // installed by agent — managed file; edits are overwritten on the next launch.
-// AGENT_RELAY_VERSION=1
+// KATAMI_RELAY_VERSION=1
 // @ts-nocheck
 //
 // Relays pi session events to the agent supervisor over its unix socket and
-// injects the memories it returns. Inert unless AGENT_HOOK_SOCKET is set, so a
+// injects the memories it returns. Inert unless KATAMI_HOOK_SOCKET is set, so a
 // stray copy outside a supervised session does nothing.
 
 import net from "node:net";
 
-const socketPath = process.env.AGENT_HOOK_SOCKET;
+const socketPath = process.env.KATAMI_HOOK_SOCKET;
 
 function ask(event, payload, timeoutMs = 1500) {
   if (!socketPath) return Promise.resolve(null);
@@ -60,7 +60,7 @@ export default function (pi) {
     const pieces = [pendingContext, reply?.context].filter(Boolean);
     pendingContext = null;
     if (!pieces.length) return;
-    return { message: { customType: "agent-memory", content: pieces.join("\n\n"), display: false } };
+    return { message: { customType: "katami-memory", content: pieces.join("\n\n"), display: false } };
   });
 
   pi.on("agent_end", (_event, ctx) => {

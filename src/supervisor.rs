@@ -1,8 +1,8 @@
-//! The supervisor: keeps the session's terminal honest while agent stays alive
+//! The supervisor: keeps the session's terminal honest while katami stays alive
 //! around it.
 //!
 //! The byte stream between the user and the wrapped tool is never parsed —
-//! it's spliced verbatim. Everything agent learns arrives through hook events
+//! it's spliced verbatim. Everything katami learns arrives through hook events
 //! relayed to a unix socket, not through the terminal, so the same supervisor
 //! serves claude, codex, pi, and opencode (and any of them shelling out to
 //! another). One thread pumps stdin into the pty master; the main loop polls
@@ -64,7 +64,7 @@ fn review_seen_sessions(context: &ServerContext) {
     }
 }
 
-/// Serves `agent hook` clients for the lifetime of one session. The accept
+/// Serves `katami hook` clients for the lifetime of one session. The accept
 /// loop runs on its own thread; each connection is one request/reply and is
 /// handled inline — handlers must stay fast, the hook client gives up after
 /// 1.5 seconds.

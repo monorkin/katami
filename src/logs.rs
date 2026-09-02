@@ -1,5 +1,5 @@
 //! One appender for every component's activity log. The files under the logs
-//! directory are what `agent log` merges, so every line gets the same shape:
+//! directory are what `katami log` merges, so every line gets the same shape:
 //! an ISO timestamp, a space, the message. Logging never fails loudly — a
 //! full disk shouldn't take a hook or a reviewer down with it.
 

@@ -1,10 +1,10 @@
-//! The settings overlay: how agent's hooks reach Claude Code without touching
+//! The settings overlay: how katami's hooks reach Claude Code without touching
 //! the user's configuration.
 //!
 //! Claude Code merges settings from every source — user, project, local,
 //! managed, and a `--settings` file — and hooks merge across levels rather
 //! than replacing each other. So a per-launch overlay file passed via
-//! `--settings` adds agent's hooks for exactly one session and leaves every
+//! `--settings` adds katami's hooks for exactly one session and leaves every
 //! other settings file alone. If the user forwarded their own `--settings`,
 //! the two files are merged into the overlay instead of passing the flag
 //! twice, since claude's behavior for a repeated flag is undocumented.
@@ -26,7 +26,7 @@ const EVENTS: [(&str, Option<&str>, u32); 5] = [
 
 pub fn write(user_settings: Option<&Path>) -> Result<PathBuf> {
     let agent_binary =
-        std::env::current_exe().context("could not determine the agent binary path")?;
+        std::env::current_exe().context("could not determine the katami binary path")?;
 
     let mut settings = match user_settings {
         Some(path) => {

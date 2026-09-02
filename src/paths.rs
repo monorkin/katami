@@ -59,10 +59,25 @@ fn config_home() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
-        PathBuf::from(dir).join("agent")
+    let base = |root: PathBuf| root.join("katami");
+    // One-time move from the pre-rename location, so an existing store keeps
+    // its memories under the new name.
+    let dir = if let Some(xdg) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
+        base(PathBuf::from(xdg))
     } else {
-        home().join(".local/share/agent")
+        base(home().join(".local/share"))
+    };
+    migrate_legacy_dir(&dir);
+    dir
+}
+
+fn migrate_legacy_dir(new_dir: &PathBuf) {
+    if new_dir.exists() {
+        return;
+    }
+    let legacy = new_dir.with_file_name("agent");
+    if legacy.is_dir() {
+        let _ = std::fs::rename(&legacy, new_dir);
     }
 }
 
@@ -88,10 +103,10 @@ pub fn launches_path() -> PathBuf {
 
 pub fn runtime_dir() -> PathBuf {
     if let Some(dir) = env::var_os("XDG_RUNTIME_DIR").filter(|it| !it.is_empty()) {
-        PathBuf::from(dir).join("agent")
+        PathBuf::from(dir).join("katami")
     } else {
         let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/agent-{uid}"))
+        PathBuf::from(format!("/tmp/katami-{uid}"))
     }
 }
 

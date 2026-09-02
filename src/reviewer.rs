@@ -150,7 +150,7 @@ fn read_delta(memory: &Memory, source: &Source, context_limit: usize) -> Result<
 }
 
 fn spawn_detached(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
-    let agent = std::env::current_exe().context("could not determine the agent binary path")?;
+    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
     let mut command = Command::new(agent);
     command
         .args(["review", "--config-dir"])

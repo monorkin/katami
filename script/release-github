@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+source script/lib
+
+main() {
+  command -v gh >/dev/null || die "gh is required to publish GitHub releases"
+  ls dist/"$BINARY"-* >/dev/null 2>&1 || die "No binaries in dist/, run 'make build-all' first"
+
+  echo
+  echo "=== GITHUB: $BINARY ==="
+  echo
+
+  if gh release view "v$VERSION" >/dev/null 2>&1; then
+    echo "Release v$VERSION already exists, skipping"
+  else
+    gh release create "v$VERSION" dist/"$BINARY"-* --title "v$VERSION" --generate-notes
+  fi
+}
+
+main "$@"

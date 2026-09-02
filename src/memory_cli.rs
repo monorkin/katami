@@ -1,4 +1,4 @@
-//! `agent memory`: the human's window into the store — and a debugging
+//! `katami memory`: the human's window into the store — and a debugging
 //! surface for everything the hooks do silently.
 
 use anyhow::{Context, Result};
@@ -47,12 +47,12 @@ pub fn add(
 pub fn search(query: &str) -> Result<()> {
     let memory = open()?;
     if !embeddings::available() {
-        println!("Keyword search only — run `agent memory pull-models` to enable semantic search.");
+        println!("Keyword search only — run `katami memory pull-models` to enable semantic search.");
     }
 
     let hits = search::hybrid(&memory, query, 10)?;
     if hits.is_empty() {
-        println!("No memories match — see `agent memory list` for what's stored.");
+        println!("No memories match — see `katami memory list` for what's stored.");
         return Ok(());
     }
 
@@ -97,7 +97,7 @@ pub fn list(filter: ListFilter) -> Result<()> {
     let memory = open()?;
     let rows = memory.overview(filter)?;
     if rows.is_empty() {
-        println!("No memories here — sessions will add them, or use `agent memory add`.");
+        println!("No memories here — sessions will add them, or use `katami memory add`.");
         return Ok(());
     }
 
@@ -133,7 +133,7 @@ pub fn archive(id: i64) -> Result<()> {
     let stored = memory.get(id)?;
     memory.archive(id, "manual")?;
     println!(
-        "Archived {id}: {} — bring it back with `agent memory unarchive {id}`",
+        "Archived {id}: {} — bring it back with `katami memory unarchive {id}`",
         stored.title
     );
     Ok(())
@@ -150,7 +150,7 @@ pub fn edit(id: i64) -> Result<()> {
     let memory = open()?;
     let stored = memory.get(id)?;
 
-    let path = std::env::temp_dir().join(format!("agent-memory-{id}.md"));
+    let path = std::env::temp_dir().join(format!("katami-memory-{id}.md"));
     fsutil::write_atomically(&path, &edit_buffer(&stored))?;
     launch_editor(&path)?;
     let edited = std::fs::read_to_string(&path)?;

@@ -6,7 +6,7 @@
 //! `user` and `assistant` roles here — injected context (our own, plus
 //! codex's plugin recommendations and environment blocks) arrives as
 //! `developer`-role messages, so filtering to those two roles is the
-//! structural self-ingestion guard: nothing agent injected ever comes back.
+//! structural self-ingestion guard: nothing katami injected ever comes back.
 
 use serde_json::Value;
 
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn drops_injected_developer_context_and_non_messages() {
         let developer = record(
-            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<agent-memory> injected"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<katami-memory> injected"}]}}"#,
         );
         let reasoning = record(
             r#"{"type":"response_item","payload":{"type":"reasoning","summary":[]}}"#,

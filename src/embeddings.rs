@@ -3,7 +3,7 @@
 //! Model2Vec models are lookup tables — embedding is tokenize, look up, and
 //! mean-pool, microseconds on a CPU — so vectors can be computed inline
 //! wherever a memory is written and queries can be embedded per keystroke of
-//! budget. The model is fetched once with `agent memory pull-models`; until
+//! budget. The model is fetched once with `katami memory pull-models`; until
 //! then everything degrades to BM25-only, silently in hooks and with advice
 //! in the CLI. Nothing ever downloads on a hook path.
 

@@ -2,7 +2,7 @@
 //!
 //! When the wrapped command is a plain `claude`, the config dir is knowable
 //! before launch. When it's a wrapper like `ax run` that picks its own
-//! CLAUDE_CONFIG_DIR mid-flight, agent only learns the real dir from the
+//! CLAUDE_CONFIG_DIR mid-flight, katami only learns the real dir from the
 //! first hook frame — too late for pre-launch work like materializing
 //! skills. So each launch key (cwd + claude command) records the config dir
 //! it last resolved to, and the next launch under the same key starts with
