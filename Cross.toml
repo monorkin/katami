@@ -1,0 +1,8 @@
+# The pinned cross 0.2.5 images ship an ancient glibc (2.23) that can't run
+# build scripts a current rustc produces. The :main images track a modern
+# Ubuntu, so they have a new enough glibc.
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"

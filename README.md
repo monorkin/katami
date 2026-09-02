@@ -120,9 +120,19 @@ cargo build --release              # → target/release/katami
 sudo make install                  # → /usr/bin/katami
 ```
 
-Static musl release builds (`make build-all`, used by `make release`) need
-`cross` for the C pieces (bundled SQLite, ring). A local `make install`
-just needs the host toolchain.
+A local `make install` just needs the host toolchain.
+
+Cutting a release (`make release`, or `make build-all` on its own)
+cross-builds static musl binaries for amd64 and arm64, which needs
+[`cross`](https://github.com/cross-rs/cross) and a running Docker or Podman:
+
+```bash
+cargo install cross
+make release        # builds both targets, publishes the GitHub release
+```
+
+`Cross.toml` pins the `:main` cross images — the default pinned images ship a
+glibc too old to run a current rustc's build scripts.
 
 ## License
 
