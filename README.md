@@ -21,7 +21,7 @@ mise hides releases younger than 24 hours by default (`minimum_release_age`).
 If the latest release is fresher than that, pin the version instead:
 
 ```bash
-mise use -g github:monorkin/katami@v0.2.2
+mise use -g github:monorkin/katami@v0.2.3
 ```
 
 On [Omarchy](https://omarchy.org):

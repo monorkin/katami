@@ -6,6 +6,11 @@
 //! rides along so the right account's auth pays for the call, and the hook
 //! socket is stripped so the headless run's hooks no-op instead of relaying
 //! into the live session.
+//!
+//! Haiku occasionally answers in prose or bends the schema. Rather than burn a
+//! whole retry with backoff on that, the same session is resumed with the
+//! parse error and asked for the JSON again, up to three tries in all — it
+//! already has the input, so a correction is cheap and usually lands.
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
@@ -15,7 +20,29 @@ use std::process::{Command, Stdio};
 
 use crate::hook_protocol;
 
+const CORRECTIONS: usize = 2;
+
 pub fn ask<T: DeserializeOwned>(prompt: &str, input: &str, config_dir: &Path) -> Result<T> {
+    let reply = run(prompt, input, None, config_dir)?;
+    let mut outcome = parse(&reply.result);
+
+    for _ in 0..CORRECTIONS {
+        let Err(error) = &outcome else { break };
+        let correction = format!(
+            "That reply was not the expected JSON ({error:#}). Reply again with ONLY the JSON object described in the instructions — no prose, no code fences."
+        );
+        let retried = run(&correction, "", Some(&reply.session_id), config_dir)?;
+        outcome = parse(&retried.result);
+    }
+    outcome
+}
+
+struct Reply {
+    session_id: String,
+    result: String,
+}
+
+fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Result<Reply> {
     let mut command = Command::new("claude");
     command
         .args(["-p", prompt, "--model", "haiku", "--output-format", "json"])
@@ -24,6 +51,9 @@ pub fn ask<T: DeserializeOwned>(prompt: &str, input: &str, config_dir: &Path) ->
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if let Some(session_id) = resume {
+        command.args(["--resume", session_id]);
+    }
 
     let mut child = command
         .spawn()
@@ -43,6 +73,13 @@ pub fn ask<T: DeserializeOwned>(prompt: &str, input: &str, config_dir: &Path) ->
     let result = envelope["result"]
         .as_str()
         .context("claude's output carried no result field")?;
+    let session_id = envelope["session_id"]
+        .as_str()
+        .context("claude's output carried no session_id field")?;
+    Ok(Reply { session_id: session_id.to_string(), result: result.to_string() })
+}
+
+fn parse<T: DeserializeOwned>(result: &str) -> Result<T> {
     serde_json::from_str(strip_fences(result)).context("the reply was not the expected JSON")
 }
 
