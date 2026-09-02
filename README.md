@@ -17,6 +17,13 @@ mise use -g github:monorkin/katami                  # install it and put katami 
 mise exec github:monorkin/katami -- katami --help   # or run it once without installing
 ```
 
+mise hides releases younger than 24 hours by default (`minimum_release_age`).
+If the latest release is fresher than that, pin the version instead:
+
+```bash
+mise use -g github:monorkin/katami@v0.2.0
+```
+
 On [Omarchy](https://omarchy.org):
 
 ```bash
