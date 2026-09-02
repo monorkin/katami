@@ -121,36 +121,52 @@ fn sanitize(query: &str) -> Option<String> {
     }
 }
 
-pub fn compose_context(memory: &Memory, hits: &[Hit]) -> Result<Option<String>> {
+/// What actually went out the door, by id — the delivery manifest is what
+/// retirement and ranking decisions trust, so it must record what fit the
+/// budget, not what was merely ranked.
+pub struct ComposedContext {
+    pub text: String,
+    pub full_ids: Vec<i64>,
+    pub pointer_ids: Vec<i64>,
+}
+
+pub fn compose_context(memory: &Memory, hits: &[Hit]) -> Result<Option<ComposedContext>> {
     if hits.is_empty() {
         return Ok(None);
     }
 
-    let mut context = String::from("Relevant memories:\n");
-    let mut pointers: Vec<String> = Vec::new();
+    let mut text = String::from("Relevant memories:\n");
+    let mut full_ids = Vec::new();
+    let mut pointers: Vec<(i64, String)> = Vec::new();
     let body_budget = CONTEXT_BUDGET_CHARS * 3 / 4;
 
     for hit in hits {
         let stored = memory.get(hit.id)?;
         let entry = format!("\n## {}\n{}\n", stored.title, stored.body.trim());
-        if context.len() + entry.len() <= body_budget {
-            context.push_str(&entry);
+        if text.len() + entry.len() <= body_budget {
+            text.push_str(&entry);
+            full_ids.push(stored.id);
             for neighbor in memory.neighbors(hit.id)? {
-                let pointer = pointer_line(&neighbor);
-                if !pointers.contains(&pointer) {
-                    pointers.push(pointer);
+                if !pointers.iter().any(|(id, _)| *id == neighbor.id) {
+                    pointers.push((neighbor.id, pointer_line(&neighbor)));
                 }
             }
         }
     }
 
-    for pointer in pointers {
-        if context.len() + pointer.len() > CONTEXT_BUDGET_CHARS {
+    let mut pointer_ids = Vec::new();
+    for (id, pointer) in pointers {
+        if text.len() + pointer.len() > CONTEXT_BUDGET_CHARS {
             break;
         }
-        context.push_str(&pointer);
+        text.push_str(&pointer);
+        pointer_ids.push(id);
     }
-    Ok(Some(context))
+    Ok(Some(ComposedContext {
+        text,
+        full_ids,
+        pointer_ids,
+    }))
 }
 
 fn pointer_line(neighbor: &Stored) -> String {
@@ -178,6 +194,7 @@ mod tests {
                 body: "The supervisor never parses the pty byte stream.".into(),
                 links: vec!["Hook protocol".into()],
                 source_session: None,
+                class: None,
             })
             .unwrap();
         memory
@@ -188,6 +205,7 @@ mod tests {
                 body: "Newline-delimited JSON. One request per connection.".into(),
                 links: vec![],
                 source_session: None,
+                class: None,
             })
             .unwrap();
         memory
@@ -212,12 +230,14 @@ mod tests {
     fn context_includes_bodies_and_neighbor_pointers() {
         let memory = seeded();
         let hits = bm25(&memory, "pty stream supervisor", 5).unwrap();
-        let context = compose_context(&memory, &hits).unwrap().unwrap();
+        let composed = compose_context(&memory, &hits).unwrap().unwrap();
 
-        assert!(context.contains("## Supervisor design"));
-        assert!(context.contains("never parses the pty"));
-        assert!(context.contains("Linked: [[Hook protocol]] — Newline-delimited JSON"));
-        assert!(context.len() <= CONTEXT_BUDGET_CHARS + 100);
+        assert!(composed.text.contains("## Supervisor design"));
+        assert!(composed.text.contains("never parses the pty"));
+        assert!(composed.text.contains("Linked: [[Hook protocol]] — Newline-delimited JSON"));
+        assert!(composed.text.len() <= CONTEXT_BUDGET_CHARS + 100);
+        assert_eq!(composed.full_ids.len(), 1);
+        assert_eq!(composed.pointer_ids.len(), 1);
     }
 
     #[test]

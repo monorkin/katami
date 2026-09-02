@@ -64,6 +64,35 @@ pub fn project_entity(cwd: &Path) -> String {
     format!("project:{}", cwd.display())
 }
 
+/// The canonical identity of the project at `cwd`: symlinks resolved, and —
+/// when inside a git checkout — the main repository root, so every worktree
+/// and subdirectory of one project shares one memory home. Remotes are
+/// deliberately not used as identity: forks and URL churn make them lie.
+pub fn canonical_project_entity(cwd: &Path) -> String {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    project_entity(&git_main_root(&cwd).unwrap_or(cwd))
+}
+
+fn git_main_root(cwd: &Path) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(cwd)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let common_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let common_dir = if common_dir.is_relative() {
+        cwd.join(common_dir)
+    } else {
+        common_dir
+    };
+    common_dir.canonicalize().ok()?.parent().map(Path::to_path_buf)
+}
+
 /// The human half of an entity string: `project:/x/app` → `/x/app`,
 /// `person:Jason` → `Jason`.
 pub fn entity_name(entity: &str) -> &str {

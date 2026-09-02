@@ -74,7 +74,9 @@ pub fn run(config_dir: &Path) -> Result<()> {
     archive_unused_skills(&memory)?;
     archive_stale_statuses(&memory)?;
     archive_never_retrieved(&memory)?;
+    rehome_aliased_memories(&memory)?;
     reembed_missing(&memory)?;
+    crate::reviewer::drain(config_dir)?;
     consolidate_entities(&memory, config_dir)?;
     cards::render_all(&memory, &paths::memory_dir().join("cards"))?;
     sweep_files(&memory)?;
@@ -89,7 +91,7 @@ pub fn run(config_dir: &Path) -> Result<()> {
 fn archive_stale_statuses(memory: &Memory) -> Result<()> {
     for status in memory.list()?.iter().filter(|it| it.kind == Kind::Status) {
         if clock::days_since(&status.updated) > 14 {
-            memory.archive(status.id)?;
+            memory.archive(status.id, "stale")?;
             log(&format!("archived stale status for {}", status.entity.as_deref().unwrap_or("?")));
         }
     }
@@ -99,9 +101,17 @@ fn archive_stale_statuses(memory: &Memory) -> Result<()> {
 fn archive_never_retrieved(memory: &Memory) -> Result<()> {
     for observation in memory.unretrieved_observations()? {
         if clock::days_since(&observation.updated) > 90 {
-            memory.archive(observation.id)?;
+            memory.archive(observation.id, "never_retrieved")?;
             log(&format!("archived never-retrieved [[{}]]", observation.title));
         }
+    }
+    Ok(())
+}
+
+fn rehome_aliased_memories(memory: &Memory) -> Result<()> {
+    let moved = memory.rehome_aliased_entities()?;
+    if moved > 0 {
+        log(&format!("re-homed {moved} memories onto canonical project entities"));
     }
     Ok(())
 }
@@ -221,12 +231,13 @@ fn apply(
             body: consolidation.card_body.clone(),
             links: cards::extract_links(&consolidation.card_body),
             source_session: None,
+            class: None,
         })?,
     };
     embeddings::embed_into(memory, id, &consolidation.card_body)?;
 
     for folded in &consolidation.folded_ids {
-        memory.archive(*folded)?;
+        memory.archive(*folded, "folded")?;
     }
     Ok(())
 }

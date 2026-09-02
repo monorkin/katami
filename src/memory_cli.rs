@@ -33,6 +33,7 @@ pub fn add(
         body: body.to_string(),
         links: all_links,
         source_session: None,
+        class: None,
     })?;
     embeddings::embed_into(&memory, id, &format!("{title}\n{body}"))?;
 
@@ -130,7 +131,7 @@ pub fn list(filter: ListFilter) -> Result<()> {
 pub fn archive(id: i64) -> Result<()> {
     let memory = open()?;
     let stored = memory.get(id)?;
-    memory.archive(id)?;
+    memory.archive(id, "manual")?;
     println!(
         "Archived {id}: {} — bring it back with `agent memory unarchive {id}`",
         stored.title

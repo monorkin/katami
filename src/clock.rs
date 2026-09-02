@@ -11,6 +11,10 @@ pub fn timestamp_days_ago(days: u64) -> String {
     format_epoch_seconds(now_epoch_seconds().saturating_sub(days * 86_400))
 }
 
+pub fn timestamp_in(seconds: u64) -> String {
+    format_epoch_seconds(now_epoch_seconds() + seconds)
+}
+
 /// Whole days between a stored ISO timestamp and now; unparseable or future
 /// timestamps count as today.
 pub fn days_since(timestamp: &str) -> u64 {

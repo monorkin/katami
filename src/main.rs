@@ -17,27 +17,34 @@ mod memory_cli;
 mod overlay;
 mod paths;
 mod pty;
+mod relays;
 mod reviewer;
 mod search;
 mod supervisor;
 mod transcript;
+mod transcript_codex;
+mod transcript_opencode;
+mod transcript_pi;
 mod virtual_skills;
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use usage::{Cli, Subcommands};
 
-/// Supervisor for Claude Code: wraps a claude launch and learns from it
+/// Supervisor for coding agents: wraps a launch and learns from the session
 #[derive(Cli)]
 #[usage(bin = "agent", version, unknown_flags = "error", completion)]
 struct Cli {
-    /// Command used to launch claude, split on whitespace
+    /// Command used to launch the coding tool, split on whitespace
     #[usage(long, default = "claude")]
-    claude_cmd: String,
+    cmd: String,
+    /// Deprecated alias for --cmd
+    #[usage(long, hide = true)]
+    claude_cmd: Option<String>,
     /// Launch directly without the supervisor
     #[usage(long)]
     exec: bool,
-    /// Arguments forwarded to claude
+    /// Arguments forwarded to the coding tool
     #[usage(double_dash = "required")]
     claude_args: Vec<String>,
     #[usage(subcommand)]
@@ -46,18 +53,30 @@ struct Cli {
 
 #[derive(Subcommands)]
 enum Command {
-    /// Relay a Claude Code hook event to the supervisor
+    /// Relay a coding tool's hook event to the supervisor
     #[usage(hide = true)]
-    Hook { event: String },
+    Hook {
+        tool: String,
+        event: Option<String>,
+    },
     /// Distill a transcript delta into memories (spawned by the supervisor)
     #[usage(hide = true)]
     Review {
+        #[usage(long, default = "claude")]
+        tool: String,
         #[usage(long)]
-        transcript: PathBuf,
+        transcript: Option<PathBuf>,
+        #[usage(long)]
+        session: Option<String>,
         #[usage(long)]
         config_dir: PathBuf,
         #[usage(long)]
         cwd: Option<PathBuf>,
+    },
+    /// Install the memory relays into codex, pi, and opencode
+    Relays {
+        #[usage(subcommand)]
+        command: RelaysCommand,
     },
     /// Consolidate memories and archive unused skills (spawned by the supervisor)
     #[usage(hide = true)]
@@ -84,6 +103,14 @@ enum Command {
         #[usage(subcommand)]
         command: ShellCompletionCommand,
     },
+}
+
+#[derive(Subcommands)]
+enum RelaysCommand {
+    /// Write the relays into codex, pi, and opencode
+    Install,
+    /// Show each relay's installed state
+    Status,
 }
 
 #[derive(Subcommands)]
@@ -158,12 +185,18 @@ fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Some(Command::Hook { event }) => hook_client::run(&event),
+        Some(Command::Hook { tool, event }) => run_hook(&tool, event.as_deref()),
         Some(Command::Review {
+            tool,
             transcript,
+            session,
             config_dir,
             cwd,
-        }) => reviewer::run(&transcript, &config_dir, cwd.as_deref()),
+        }) => run_review(&tool, transcript, session, &config_dir, cwd.as_deref()),
+        Some(Command::Relays { command }) => match command {
+            RelaysCommand::Install => relays::install_command(),
+            RelaysCommand::Status => relays::status_command(),
+        },
         Some(Command::Curate { config_dir }) => curator::run(&config_dir),
         Some(Command::Log { lines, follow }) => log_cli::print(lines, follow),
         Some(Command::Memory { command }) => match command {
@@ -199,7 +232,39 @@ fn run(cli: Cli) -> Result<()> {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
             ShellCompletionCommand::Install { shell } => completions::install(&shell),
         },
-        None => launch::run(&cli.claude_cmd, &cli.claude_args, cli.exec),
+        None => {
+            // The old flag wins when both are given, so existing scripts keep working
+            let cmd = cli.claude_cmd.unwrap_or(cli.cmd);
+            launch::run(&cmd, &cli.claude_args, cli.exec)
+        }
     }
+}
+
+fn run_hook(tool: &str, event: Option<&str>) -> Result<()> {
+    // Back-compat: an overlay from before the rename says `agent hook <Event>`,
+    // so a lone positional is the event and the tool is claude.
+    let (tool, event) = match event {
+        Some(event) => (hook_protocol::Tool::parse(tool).unwrap_or_default(), event),
+        None => (hook_protocol::Tool::Claude, tool),
+    };
+    hook_client::run(tool, event)
+}
+
+fn run_review(
+    tool: &str,
+    transcript: Option<PathBuf>,
+    session: Option<String>,
+    config_dir: &PathBuf,
+    cwd: Option<&Path>,
+) -> Result<()> {
+    let tool = hook_protocol::Tool::parse(tool).unwrap_or_default();
+    let source = match (tool, transcript, session) {
+        (hook_protocol::Tool::Opencode, _, Some(session_id)) => {
+            transcript::Source::Opencode { session_id }
+        }
+        (_, Some(path), _) => transcript::Source::File { tool, path },
+        _ => anyhow::bail!("review needs --transcript for a file-based tool, or --session for opencode"),
+    };
+    reviewer::run(&source, config_dir, cwd)
 }
 

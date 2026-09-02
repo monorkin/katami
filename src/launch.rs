@@ -1,40 +1,64 @@
-//! Composing and launching the wrapped claude command.
+//! Composing and launching the wrapped coding tool.
 //!
-//! `--claude-cmd` names the launcher — a bare `claude`, or a wrapper like
-//! `ax run --account work --` — and is split on whitespace: shell quoting
-//! isn't interpreted, so anything fancier belongs in a wrapper script. The
-//! forwarded arguments after `--` are appended verbatim.
+//! `--cmd` names the launcher — a bare `claude`, `codex`, `pi`, `opencode`, or
+//! a wrapper like `ax run --account work --` — split on whitespace, so shell
+//! quoting isn't interpreted and anything fancier belongs in a wrapper script.
+//! Forwarded arguments after `--` are appended verbatim.
+//!
+//! Every launch first installs the relays into codex, pi, and opencode, so a
+//! session that shells out to another tool mid-run relays to this same
+//! supervisor. Claude alone needs a per-launch settings overlay and skill
+//! materialization; the others carry their integration in their relays.
 
 use anyhow::{Context, Result, bail};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::hook_protocol::Tool;
 use crate::launches;
 use crate::memory::Memory;
 use crate::overlay;
 use crate::paths;
 use crate::pty;
+use crate::relays;
 use crate::supervisor;
 use crate::virtual_skills;
 
-pub fn run(claude_cmd: &str, claude_args: &[String], exec: bool) -> Result<()> {
+pub fn run(cmd: &str, claude_args: &[String], exec: bool) -> Result<()> {
+    let _ = relays::install_all();
+
     if exec {
-        let mut command = compose(claude_cmd, claude_args.to_vec())?;
+        let mut command = compose(cmd, claude_args.to_vec())?;
         return Err(command.exec())
-            .with_context(|| format!("could not launch {claude_cmd} — is it on your PATH?"));
+            .with_context(|| format!("could not launch {cmd} — is it on your PATH?"));
     }
 
-    let (mut claude_args, user_settings) = extract_user_settings(claude_args)?;
-    let overlay_path = overlay::write(user_settings.as_deref())?;
-    claude_args.push("--settings".into());
-    claude_args.push(overlay_path.display().to_string());
+    let launch_key = launches::key(&std::env::current_dir()?, cmd);
+    let mut forwarded = claude_args.to_vec();
+    let mut overlay_path = None;
 
-    let launch_key = launches::key(&std::env::current_dir()?, claude_cmd);
-    materialize_skills(claude_cmd, &launch_key);
-    let mut command = compose(claude_cmd, claude_args)?;
+    if wraps_claude(cmd) {
+        let (args, user_settings) = extract_user_settings(claude_args)?;
+        let path = overlay::write(user_settings.as_deref())?;
+        forwarded = args;
+        forwarded.push("--settings".into());
+        forwarded.push(path.display().to_string());
+        materialize_skills(cmd, &launch_key);
+        overlay_path = Some(path);
+    }
 
-    let code = if pty::is_terminal(libc::STDIN_FILENO) && pty::is_terminal(libc::STDOUT_FILENO) {
+    let command = compose(cmd, forwarded)?;
+    let code = supervise_or_pipe(command, cmd, launch_key);
+
+    if let Some(path) = &overlay_path {
+        overlay::remove(path);
+    }
+    std::process::exit(code?);
+}
+
+fn supervise_or_pipe(mut command: Command, cmd: &str, launch_key: String) -> Result<i32> {
+    if pty::is_terminal(libc::STDIN_FILENO) && pty::is_terminal(libc::STDOUT_FILENO) {
         supervisor::supervise(command, launch_key)
     } else {
         // No supervisor here, so an inherited socket from an outer supervised
@@ -43,12 +67,17 @@ pub fn run(claude_cmd: &str, claude_args: &[String], exec: bool) -> Result<()> {
         command.env_remove(crate::hook_protocol::SOCKET_ENV_VAR);
         let status = command
             .status()
-            .with_context(|| format!("could not launch {claude_cmd} — is it on your PATH?"))?;
+            .with_context(|| format!("could not launch {cmd} — is it on your PATH?"))?;
         Ok(exit_code(&status))
-    };
+    }
+}
 
-    overlay::remove(&overlay_path);
-    std::process::exit(code?);
+/// The settings overlay is a claude feature, so it's only for a claude launch.
+/// A wrapper like `ax run --` ends in claude; only an explicit codex/pi/
+/// opencode command is not claude.
+fn wraps_claude(cmd: &str) -> bool {
+    !cmd.split_whitespace()
+        .any(|word| matches!(Tool::parse(word), Some(tool) if tool != Tool::Claude))
 }
 
 fn compose(claude_cmd: &str, claude_args: Vec<String>) -> Result<Command> {

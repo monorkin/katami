@@ -1,29 +1,66 @@
 //! The wire between a hook process and the supervisor.
 //!
-//! One connection per hook call: the client sends a single line of JSON and
-//! reads a single line back — the exact body the hook prints to Claude Code.
-//! Newline-delimited JSON over a unix socket keeps both sides trivial and
+//! One connection per hook call: the client (or a tool's relay) sends a
+//! single line of JSON and reads a single line back — the supervisor's
+//! canonical reply, which each edge formats into its tool's native shape.
+//! Newline-delimited JSON over a unix socket keeps every side trivial and
 //! testable; there's no framing to get wrong beyond "one line each way".
 //!
-//! Every frame carries the hook process's effective `CLAUDE_CONFIG_DIR`. The
-//! supervisor can't know pre-launch which config dir a wrapper like `ax run`
-//! will pick, but hooks are children of claude and inherit its environment —
-//! so the frame is where that knowledge crosses over.
+//! A frame names the `tool` it came from and, for Claude, the hook process's
+//! effective `CLAUDE_CONFIG_DIR`. The supervisor can't know pre-launch which
+//! config dir a wrapper like `ax run` will pick, but hooks are children of
+//! claude and inherit its environment — so the frame is where that knowledge
+//! crosses over. Other tools don't carry it: they don't have per-account
+//! config dirs the reviewer needs.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-/// Where the client finds the supervisor's socket — part of the wire
-/// contract, and doubling as the recursion guard: headless claude runs get
-/// it stripped, so their hooks no-op.
+/// Where a relay finds the supervisor's socket — part of the wire contract,
+/// and doubling as the recursion guard and the arming gate: a process without
+/// it (a headless reviewer run, an unsupervised session) relays nothing.
 pub const SOCKET_ENV_VAR: &str = "AGENT_HOOK_SOCKET";
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Tool {
+    #[default]
+    Claude,
+    Codex,
+    Pi,
+    Opencode,
+}
+
+impl Tool {
+    pub fn parse(name: &str) -> Option<Tool> {
+        match name {
+            "claude" => Some(Tool::Claude),
+            "codex" => Some(Tool::Codex),
+            "pi" => Some(Tool::Pi),
+            "opencode" => Some(Tool::Opencode),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tool::Claude => "claude",
+            Tool::Codex => "codex",
+            Tool::Pi => "pi",
+            Tool::Opencode => "opencode",
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct HookRequest {
     pub event: String,
-    pub config_dir: PathBuf,
+    #[serde(default)]
+    pub tool: Tool,
+    #[serde(default)]
+    pub config_dir: Option<PathBuf>,
     pub payload: serde_json::Value,
 }
 
@@ -71,7 +108,8 @@ mod tests {
     fn frames_round_trip() {
         let request = HookRequest {
             event: "UserPromptSubmit".into(),
-            config_dir: "/home/someone/.claude".into(),
+            tool: Tool::Codex,
+            config_dir: None,
             payload: json!({
                 "session_id": "abc123",
                 "transcript_path": "/tmp/transcript.jsonl",
@@ -86,8 +124,21 @@ mod tests {
         let parsed = read_frame(&mut BufReader::new(wire.as_slice())).unwrap();
 
         assert_eq!(parsed.event, "UserPromptSubmit");
-        assert_eq!(parsed.config_dir, PathBuf::from("/home/someone/.claude"));
+        assert_eq!(parsed.tool, Tool::Codex);
         assert_eq!(parsed.payload["prompt"], "find my notes");
+    }
+
+    #[test]
+    fn old_frames_without_tool_parse_as_claude() {
+        let wire = concat!(
+            r#"{"event":"Stop","config_dir":"/home/someone/.claude","#,
+            r#""payload":{"session_id":"s1"}}"#,
+            "\n"
+        );
+        let parsed = read_frame(&mut BufReader::new(wire.as_bytes())).unwrap();
+
+        assert_eq!(parsed.tool, Tool::Claude);
+        assert_eq!(parsed.config_dir, Some(PathBuf::from("/home/someone/.claude")));
     }
 
     #[test]

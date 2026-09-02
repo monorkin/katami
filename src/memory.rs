@@ -24,7 +24,23 @@ pub struct NewMemory {
     pub body: String,
     pub links: Vec<String>,
     pub source_session: Option<String>,
+    pub class: Option<String>,
 }
+
+/// Why an observation was captured — and how long it deserves to live. A
+/// preference that hasn't come up in months is still a preference; only
+/// history and reference age out for lack of retrieval.
+pub const CLASSES: [&str; 7] = [
+    "preference",
+    "constraint",
+    "identity",
+    "relationship",
+    "decision",
+    "history",
+    "reference",
+];
+
+pub const RETIRABLE_CLASSES: [&str; 2] = ["history", "reference"];
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Kind {
@@ -60,6 +76,101 @@ impl rusqlite::types::FromSql for Kind {
             )),
         }
     }
+}
+
+const MIGRATE_2_TO_3: &str = "
+    ALTER TABLE memories ADD COLUMN class TEXT;
+    ALTER TABLE memories ADD COLUMN archive_reason TEXT;
+
+    CREATE TABLE memory_deliveries (
+        id INTEGER PRIMARY KEY,
+        memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        form TEXT NOT NULL,
+        delivered_at TEXT NOT NULL
+    );
+    CREATE INDEX deliveries_by_memory ON memory_deliveries(memory_id, delivered_at);
+
+    CREATE TABLE memory_evidence (
+        memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        source_session TEXT,
+        turn_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        excerpt TEXT NOT NULL
+    );
+
+    CREATE TABLE review_chunks (
+        id INTEGER PRIMARY KEY,
+        transcript_path TEXT NOT NULL,
+        start_offset INTEGER NOT NULL,
+        end_offset INTEGER NOT NULL,
+        source_session TEXT,
+        project_entity TEXT,
+        turns TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_until TEXT,
+        next_attempt TEXT,
+        last_error TEXT,
+        created TEXT NOT NULL,
+        UNIQUE(transcript_path, start_offset, end_offset)
+    );
+
+    CREATE TABLE entity_aliases (
+        alias TEXT PRIMARY KEY,
+        canonical_entity TEXT NOT NULL,
+        last_seen TEXT NOT NULL
+    );
+
+    PRAGMA user_version = 3;
+";
+
+/// v4 adds string cursor tokens (opencode addresses turns by message id, not
+/// byte offset) and rebuilds review_chunks without the offset key — the
+/// atomic cursor advance is what keeps a span from re-queuing, so the offsets
+/// carried no weight.
+const MIGRATE_3_TO_4: &str = "
+    ALTER TABLE cursors ADD COLUMN token TEXT;
+
+    CREATE TABLE review_chunks_v4 (
+        id INTEGER PRIMARY KEY,
+        transcript_path TEXT NOT NULL,
+        source_session TEXT,
+        project_entity TEXT,
+        turns TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_until TEXT,
+        next_attempt TEXT,
+        last_error TEXT,
+        created TEXT NOT NULL
+    );
+    INSERT INTO review_chunks_v4
+        (id, transcript_path, source_session, project_entity, turns,
+         status, attempts, lease_until, next_attempt, last_error, created)
+    SELECT id, transcript_path, source_session, project_entity, turns,
+           status, attempts, lease_until, next_attempt, last_error, created
+    FROM review_chunks;
+    DROP TABLE review_chunks;
+    ALTER TABLE review_chunks_v4 RENAME TO review_chunks;
+
+    PRAGMA user_version = 4;
+";
+
+pub struct NewReviewChunk {
+    pub transcript_path: String,
+    pub source_session: Option<String>,
+    pub project_entity: Option<String>,
+    pub turns: String,
+}
+
+pub struct ReviewChunk {
+    pub id: i64,
+    pub source_session: Option<String>,
+    pub project_entity: Option<String>,
+    pub turns: String,
+    pub attempts: i64,
 }
 
 pub struct OverviewRow {
@@ -121,21 +232,32 @@ impl Memory {
         // The version check and the schema creation share one write
         // transaction — a supervisor and a freshly spawned reviewer can both
         // open a brand-new store at the same moment
+        // Steps run in order and each re-reads the version, so a store at any
+        // age walks the whole chain in one open.
         self.with_transaction(|memory| {
-            let version: i64 = memory
-                .connection
-                .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            if version == 0 {
-                memory.create_schema()?;
+            if memory.schema_version()? == 0 {
+                return memory.create_schema();
             }
-            if version == 1 {
+            if memory.schema_version()? == 1 {
                 // The table held reviewer state from day one — the old name lied
                 memory.connection.execute_batch(
                     "ALTER TABLE curator_state RENAME TO state; PRAGMA user_version = 2;",
                 )?;
             }
+            if memory.schema_version()? == 2 {
+                memory.connection.execute_batch(MIGRATE_2_TO_3)?;
+            }
+            if memory.schema_version()? == 3 {
+                memory.connection.execute_batch(MIGRATE_3_TO_4)?;
+            }
             Ok(())
         })
+    }
+
+    fn schema_version(&self) -> Result<i64> {
+        Ok(self
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?)
     }
 
     /// BEGIN IMMEDIATE around `work`; COMMIT on success, best-effort ROLLBACK
@@ -208,6 +330,7 @@ impl Memory {
             CREATE TABLE cursors (
                 transcript_path TEXT PRIMARY KEY,
                 byte_offset INTEGER NOT NULL,
+                token TEXT,
                 updated TEXT NOT NULL
             );
 
@@ -230,29 +353,71 @@ impl Memory {
                 vector BLOB NOT NULL
             );
 
-            PRAGMA user_version = 2;
+            ALTER TABLE memories ADD COLUMN class TEXT;
+            ALTER TABLE memories ADD COLUMN archive_reason TEXT;
+
+            CREATE TABLE memory_deliveries (
+                id INTEGER PRIMARY KEY,
+                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                form TEXT NOT NULL,
+                delivered_at TEXT NOT NULL
+            );
+            CREATE INDEX deliveries_by_memory ON memory_deliveries(memory_id, delivered_at);
+
+            CREATE TABLE memory_evidence (
+                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                source_session TEXT,
+                turn_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                excerpt TEXT NOT NULL
+            );
+
+            CREATE TABLE review_chunks (
+                id INTEGER PRIMARY KEY,
+                transcript_path TEXT NOT NULL,
+                source_session TEXT,
+                project_entity TEXT,
+                turns TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                lease_until TEXT,
+                next_attempt TEXT,
+                last_error TEXT,
+                created TEXT NOT NULL
+            );
+
+            CREATE TABLE entity_aliases (
+                alias TEXT PRIMARY KEY,
+                canonical_entity TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            );
+
+            PRAGMA user_version = 4;
             ",
         )?;
         Ok(())
     }
 
-    pub fn add(&self, observation: &NewMemory) -> Result<i64> {
+    pub fn add(&self, memory: &NewMemory) -> Result<i64> {
         let now = timestamp();
         self.connection.execute(
-            "INSERT INTO memories (kind, entity, title, body, created, updated, source_session)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+            "INSERT INTO memories (kind, entity, title, body, created, updated, source_session, class)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
             rusqlite::params![
-                observation.kind.as_str(),
-                observation.entity,
-                observation.title,
-                observation.body,
+                memory.kind.as_str(),
+                memory.entity,
+                memory.title,
+                memory.body,
                 now,
-                observation.source_session,
+                memory.source_session,
+                memory.class,
             ],
         )?;
         let id = self.connection.last_insert_rowid();
 
-        for title in &observation.links {
+        for title in &memory.links {
             self.connection.execute(
                 "INSERT OR IGNORE INTO links (from_id, to_title) VALUES (?1, ?2)",
                 rusqlite::params![id, title],
@@ -376,20 +541,10 @@ impl Memory {
                 body: body.to_string(),
                 links: Vec::new(),
                 source_session: None,
+                class: None,
             })
             .map(|_| ())
         }
-    }
-
-    pub fn recent_observations_for_entity(&self, entity: &str, limit: usize) -> Result<Vec<Stored>> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, kind, entity, title, body, pinned, archived, updated
-             FROM memories
-             WHERE archived = 0 AND kind = 'observation' AND entity = ?1
-             ORDER BY created DESC LIMIT ?2",
-        )?;
-        let rows = statement.query_map(rusqlite::params![entity, limit as i64], row_to_stored)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn entities(&self) -> Result<Vec<String>> {
@@ -433,12 +588,62 @@ impl Memory {
         Ok(())
     }
 
-    pub fn archive(&self, id: i64) -> Result<()> {
+    pub fn archive(&self, id: i64, reason: &str) -> Result<()> {
         self.connection.execute(
-            "UPDATE memories SET archived = 1, updated = ?2 WHERE id = ?1",
-            rusqlite::params![id, timestamp()],
+            "UPDATE memories SET archived = 1, archive_reason = ?2, updated = ?3 WHERE id = ?1",
+            rusqlite::params![id, reason, timestamp()],
         )?;
         Ok(())
+    }
+
+    pub fn record_delivery(&self, memory_id: i64, session_id: &str, event: &str, form: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![memory_id, session_id, event, form, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_evidence(
+        &self,
+        memory_id: i64,
+        source_session: Option<&str>,
+        turn_id: &str,
+        role: &str,
+        excerpt: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO memory_evidence (memory_id, source_session, turn_id, role, excerpt)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![memory_id, source_session, turn_id, role, excerpt],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_alias(&self, alias: &str, canonical_entity: &str) -> Result<()> {
+        if alias == canonical_entity {
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO entity_aliases (alias, canonical_entity, last_seen) VALUES (?1, ?2, ?3)
+             ON CONFLICT (alias) DO UPDATE SET canonical_entity = ?2, last_seen = ?3",
+            rusqlite::params![alias, canonical_entity, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Memories filed under a path that later resolved to a canonical project
+    /// root get moved home, so worktrees and symlinks stop splitting memory.
+    pub fn rehome_aliased_entities(&self) -> Result<usize> {
+        let moved = self.connection.execute(
+            "UPDATE memories SET entity = (
+                 SELECT canonical_entity FROM entity_aliases WHERE alias = memories.entity
+             )
+             WHERE entity IN (SELECT alias FROM entity_aliases)",
+            [],
+        )?;
+        Ok(moved)
     }
 
     pub fn unarchive(&self, id: i64) -> Result<()> {
@@ -459,8 +664,8 @@ impl Memory {
         };
         let mut statement = self.connection.prepare(&format!(
             "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated,
-                    (SELECT COUNT(*) FROM usage u WHERE u.kind = 'memory' AND u.name = m.title),
-                    (SELECT MAX(used_at) FROM usage u WHERE u.kind = 'memory' AND u.name = m.title)
+                    (SELECT COUNT(*) FROM memory_deliveries d WHERE d.memory_id = m.id),
+                    (SELECT MAX(delivered_at) FROM memory_deliveries d WHERE d.memory_id = m.id)
              FROM memories m WHERE {condition} ORDER BY m.updated DESC"
         ))?;
         let rows = statement.query_map([], |row| {
@@ -503,19 +708,109 @@ impl Memory {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Observations that were never once pulled into a session — candidates
-    /// for retirement once they're old enough.
+    /// Observations that were never once delivered into a session — retirement
+    /// candidates once they're old enough. Preferences, constraints, and
+    /// identity facts are exempt: not having come up yet doesn't make them
+    /// trivia. Unclassified rows predate classes and age out like history.
     pub fn unretrieved_observations(&self) -> Result<Vec<Stored>> {
-        let mut statement = self.connection.prepare(
+        let retirable = RETIRABLE_CLASSES
+            .iter()
+            .map(|it| format!("'{it}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = self.connection.prepare(&format!(
             "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated
              FROM memories m
              WHERE m.archived = 0 AND m.kind = 'observation' AND m.pinned = 0
+               AND (m.class IS NULL OR m.class IN ({retirable}))
                AND NOT EXISTS (
-                 SELECT 1 FROM usage u WHERE u.kind = 'memory' AND u.name = m.title
-               )",
-        )?;
+                 SELECT 1 FROM memory_deliveries d WHERE d.memory_id = m.id
+               )"
+        ))?;
         let rows = statement.query_map([], row_to_stored)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn enqueue_review_chunk(&self, chunk: &NewReviewChunk) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO review_chunks
+                 (transcript_path, source_session, project_entity, turns, created)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                chunk.transcript_path,
+                chunk.source_session,
+                chunk.project_entity,
+                chunk.turns,
+                timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Leases the oldest chunk that's due: pending with no future retry time,
+    /// or whose lease expired (a crashed reviewer drops its work back into
+    /// the pool). The lease keeps two drainers off the same chunk.
+    pub fn lease_review_chunk(&self, lease_minutes: u64) -> Result<Option<ReviewChunk>> {
+        let now = timestamp();
+        let chunk = self
+            .connection
+            .query_row(
+                "SELECT id, source_session, project_entity, turns, attempts FROM review_chunks
+                 WHERE status = 'pending'
+                   AND (next_attempt IS NULL OR next_attempt <= ?1)
+                   AND (lease_until IS NULL OR lease_until <= ?1)
+                 ORDER BY created ASC LIMIT 1",
+                [&now],
+                |row| {
+                    Ok(ReviewChunk {
+                        id: row.get(0)?,
+                        source_session: row.get(1)?,
+                        project_entity: row.get(2)?,
+                        turns: row.get(3)?,
+                        attempts: row.get(4)?,
+                    })
+                },
+            )
+            .ok();
+
+        if let Some(chunk) = &chunk {
+            let lease_until = crate::clock::timestamp_in(lease_minutes * 60);
+            self.connection.execute(
+                "UPDATE review_chunks SET lease_until = ?2 WHERE id = ?1",
+                rusqlite::params![chunk.id, lease_until],
+            )?;
+        }
+        Ok(chunk)
+    }
+
+    pub fn complete_review_chunk(&self, id: i64) -> Result<()> {
+        self.connection.execute(
+            "UPDATE review_chunks SET status = 'done', lease_until = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// A failed chunk goes back in the pool with backoff; after enough
+    /// attempts it's kept as `dead` for inspection, never deleted.
+    pub fn fail_review_chunk(&self, id: i64, attempts: i64, error: &str, cap: i64) -> Result<()> {
+        if attempts + 1 >= cap {
+            self.connection.execute(
+                "UPDATE review_chunks
+                 SET status = 'dead', attempts = ?2, last_error = ?3, lease_until = NULL
+                 WHERE id = ?1",
+                rusqlite::params![id, attempts + 1, error],
+            )?;
+        } else {
+            let backoff_seconds = (attempts as u64 + 1) * 600;
+            self.connection.execute(
+                "UPDATE review_chunks
+                 SET attempts = ?2, last_error = ?3, next_attempt = ?4, lease_until = NULL
+                 WHERE id = ?1",
+                rusqlite::params![id, attempts + 1, error, crate::clock::timestamp_in(backoff_seconds)],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn prune_cursors(&self, keep: impl Fn(&str) -> bool) -> Result<()> {
@@ -596,12 +891,6 @@ impl Memory {
         Ok(())
     }
 
-    pub fn clear_state(&self, key: &str) -> Result<()> {
-        self.connection
-            .execute("DELETE FROM state WHERE key = ?1", [key])?;
-        Ok(())
-    }
-
     pub fn cursor(&self, transcript_path: &str) -> Result<u64> {
         let offset = self
             .connection
@@ -619,6 +908,29 @@ impl Memory {
             "INSERT INTO cursors (transcript_path, byte_offset, updated) VALUES (?1, ?2, ?3)
              ON CONFLICT (transcript_path) DO UPDATE SET byte_offset = ?2, updated = ?3",
             rusqlite::params![transcript_path, byte_offset as i64, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// opencode's cursor is the last message id consumed, not a byte offset;
+    /// it shares the `cursors` table so `prune_cursors` covers both kinds.
+    pub fn cursor_token(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT token FROM cursors WHERE transcript_path = ?1",
+                [key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten())
+    }
+
+    pub fn set_cursor_token(&self, key: &str, token: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO cursors (transcript_path, byte_offset, token, updated) VALUES (?1, 0, ?2, ?3)
+             ON CONFLICT (transcript_path) DO UPDATE SET token = ?2, updated = ?3",
+            rusqlite::params![key, token, timestamp()],
         )?;
         Ok(())
     }
@@ -661,6 +973,7 @@ mod tests {
                 body: "Locking follows the proper-lockfile protocol.".into(),
                 links: vec![],
                 source_session: None,
+                class: None,
             })
             .unwrap();
         let second = memory
@@ -671,6 +984,7 @@ mod tests {
                 body: "See [[ax uses flocks]].".into(),
                 links: vec!["ax uses flocks".into()],
                 source_session: Some("s1".into()),
+                class: None,
             })
             .unwrap();
 

@@ -17,6 +17,47 @@ pub fn claude_config_home() -> PathBuf {
     }
 }
 
+/// Where the other coding tools keep the config the relays install into.
+pub fn codex_home() -> PathBuf {
+    if let Some(dir) = env::var_os("CODEX_HOME") {
+        PathBuf::from(dir)
+    } else {
+        home().join(".codex")
+    }
+}
+
+pub fn pi_extensions_dir() -> PathBuf {
+    pi_agent_dir().join("extensions")
+}
+
+fn pi_agent_dir() -> PathBuf {
+    if let Some(dir) = env::var_os("PI_CODING_AGENT_DIR").filter(|it| !it.is_empty()) {
+        PathBuf::from(dir)
+    } else {
+        home().join(".pi/agent")
+    }
+}
+
+pub fn opencode_plugins_dir() -> PathBuf {
+    config_home().join("opencode/plugins")
+}
+
+pub fn opencode_db() -> PathBuf {
+    if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
+        PathBuf::from(dir).join("opencode/opencode.db")
+    } else {
+        home().join(".local/share/opencode/opencode.db")
+    }
+}
+
+fn config_home() -> PathBuf {
+    if let Some(dir) = env::var_os("XDG_CONFIG_HOME").filter(|it| !it.is_empty()) {
+        PathBuf::from(dir)
+    } else {
+        home().join(".config")
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
         PathBuf::from(dir).join("agent")

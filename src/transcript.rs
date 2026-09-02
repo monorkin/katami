@@ -9,7 +9,9 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::hook_protocol::Tool;
 
 pub struct Turn {
     pub role: Role,
@@ -22,12 +24,59 @@ pub enum Role {
     Assistant,
 }
 
-pub fn delta_since(path: &Path, offset: u64) -> Result<(Vec<Turn>, u64)> {
-    // A session can end before Claude Code writes its transcript — no file, no delta
+pub struct Delta {
+    pub context: Vec<Turn>,
+    pub new: Vec<Turn>,
+    /// How far the cursor should advance. File sources measure it in bytes;
+    /// opencode measures it as the last message id it consumed.
+    pub cursor: Cursor,
+}
+
+#[derive(Clone)]
+pub enum Cursor {
+    Bytes(u64),
+    Token(String),
+}
+
+/// Where a session's turns live. Claude, codex, and pi write line-JSON files;
+/// opencode keeps its conversation in SQLite and is addressed by session id.
+/// The cursor key is what the store's `cursors` table is keyed by.
+#[derive(Clone)]
+pub enum Source {
+    File { tool: Tool, path: PathBuf },
+    Opencode { session_id: String },
+}
+
+impl Source {
+    pub fn cursor_key(&self) -> String {
+        match self {
+            Source::File { path, .. } => path.display().to_string(),
+            Source::Opencode { session_id } => format!("opencode:{session_id}"),
+        }
+    }
+}
+
+/// Claude's own line parser over the generic reader.
+pub fn read_delta(path: &Path, offset: u64, context_limit: usize) -> Result<Delta> {
+    read_delta_with(path, offset, context_limit, claude_turn_from)
+}
+
+/// Everything past the cursor as new turns, plus up to `context_limit` turns
+/// from just before it — the reviewer shows those as context-only so a "yes,
+/// make that my default" at a chunk boundary still resolves. `parse` is the
+/// per-tool line reader; everything else — the byte cursor, the shrink reset,
+/// the unfinished-tail stop — is format-independent.
+pub fn read_delta_with(
+    path: &Path,
+    offset: u64,
+    context_limit: usize,
+    parse: impl Fn(&Value) -> Option<Turn>,
+) -> Result<Delta> {
+    // A session can end before its tool writes the transcript — no file, no delta
     let contents = match std::fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), offset));
+            return Ok(empty_delta(offset));
         }
         Err(error) => {
             return Err(error)
@@ -37,27 +86,53 @@ pub fn delta_since(path: &Path, offset: u64) -> Result<(Vec<Turn>, u64)> {
     // A shorter file than the cursor means the transcript was rewritten —
     // start over rather than staying silent forever
     let offset = if offset as usize > contents.len() { 0 } else { offset };
-    if offset as usize >= contents.len() {
-        return Ok((Vec::new(), offset));
-    }
 
-    let delta = &contents[offset as usize..];
-    let mut turns = Vec::new();
-    let mut consumed = 0usize;
+    let mut context = Vec::new();
+    let mut new = Vec::new();
+    let mut position = 0usize;
+    let mut consumed = offset as usize;
 
-    for line in delta.split_inclusive(|it| *it == b'\n') {
-        if !line.ends_with(b"\n") {
+    for line in contents.split_inclusive(|it| *it == b'\n') {
+        let complete = line.ends_with(b"\n");
+        let before_cursor = position + line.len() <= offset as usize;
+        position += line.len();
+
+        if !complete {
             break;
         }
-        consumed += line.len();
-        if let Ok(record) = serde_json::from_slice::<Value>(line) {
-            turns.extend(turn_from(&record));
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            if !before_cursor {
+                consumed = position;
+            }
+            continue;
+        };
+        if before_cursor {
+            context.extend(parse(&record));
+        } else {
+            new.extend(parse(&record));
+            consumed = position;
         }
     }
-    Ok((turns, offset + consumed as u64))
+
+    if context.len() > context_limit {
+        context.drain(..context.len() - context_limit);
+    }
+    Ok(Delta {
+        context,
+        new,
+        cursor: Cursor::Bytes(consumed as u64),
+    })
 }
 
-fn turn_from(record: &Value) -> Option<Turn> {
+pub fn empty_delta(offset: u64) -> Delta {
+    Delta {
+        context: Vec::new(),
+        new: Vec::new(),
+        cursor: Cursor::Bytes(offset),
+    }
+}
+
+fn claude_turn_from(record: &Value) -> Option<Turn> {
     let role = match record["type"].as_str()? {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -95,7 +170,10 @@ fn strip_injected(text: &str) -> String {
     stripped.trim().to_string()
 }
 
-fn text_blocks(content: &Value) -> String {
+/// Content that is either a bare string or an array of typed blocks; the
+/// array form keeps only `text` blocks. Shared by the claude and pi parsers,
+/// which both use this shape.
+pub fn text_blocks(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks
@@ -108,18 +186,12 @@ fn text_blocks(content: &Value) -> String {
     }
 }
 
-pub fn distill(turns: &[Turn]) -> String {
-    turns
-        .iter()
-        .map(|turn| {
-            let speaker = match turn.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-            format!("{speaker}: {}", turn.text.trim())
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+pub fn new_turn(role: Role, text: String) -> Option<Turn> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(Turn { role, text })
+    }
 }
 
 pub fn user_turns(turns: &[Turn]) -> usize {
@@ -144,32 +216,64 @@ mod tests {
         path
     }
 
+    fn bytes(cursor: &Cursor) -> u64 {
+        match cursor {
+            Cursor::Bytes(offset) => *offset,
+            Cursor::Token(_) => panic!("expected a byte cursor"),
+        }
+    }
+
     #[test]
     fn deltas_skip_tool_blocks_and_incomplete_lines() {
         let path = fixture("deltas");
-        let (turns, offset) = delta_since(&path, 0).unwrap();
+        let delta = read_delta(&path, 0, 0).unwrap();
 
-        assert_eq!(turns.len(), 2);
-        assert_eq!(user_turns(&turns), 1);
-        assert!(distill(&turns).starts_with("User: I prefer rebase"));
-        assert!(distill(&turns).contains("Assistant: Rebased the branch."));
+        assert_eq!(delta.new.len(), 2);
+        assert_eq!(user_turns(&delta.new), 1);
+        assert_eq!(delta.new[0].text, "I prefer rebase over merge");
+        assert_eq!(delta.new[1].text, "Rebased the branch.");
 
-        let (again, unchanged) = delta_since(&path, offset).unwrap();
-        assert!(again.is_empty());
-        assert_eq!(unchanged, offset);
+        let offset = bytes(&delta.cursor);
+        let again = read_delta(&path, offset, 0).unwrap();
+        assert!(again.new.is_empty());
+        assert_eq!(bytes(&again.cursor), offset);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn context_turns_come_from_before_the_cursor() {
+        let path = fixture("context");
+        let offset = bytes(&read_delta(&path, 0, 0).unwrap().cursor);
+        // The transcript grows past the incomplete tail line it had at review time
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"I prefer rebase over merge"}}"#, "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#, "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Rebased the branch."}]}}"#, "\n",
+                r#"{"type":"user","message":{"role":"user","content":"yes, make that my default"}}"#, "\n",
+            ),
+        )
+        .unwrap();
+
+        let delta = read_delta(&path, offset, 2).unwrap();
+        assert_eq!(delta.context.len(), 2);
+        assert_eq!(delta.context[1].text, "Rebased the branch.");
+        assert_eq!(delta.new.len(), 1);
+        assert_eq!(delta.new[0].text, "yes, make that my default");
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn missing_transcripts_and_shrunken_files_recover() {
         let missing = std::env::temp_dir().join("agent-no-such-transcript.jsonl");
-        let (turns, offset) = delta_since(&missing, 42).unwrap();
-        assert!(turns.is_empty());
-        assert_eq!(offset, 42);
+        let delta = read_delta(&missing, 42, 0).unwrap();
+        assert!(delta.new.is_empty());
+        assert_eq!(bytes(&delta.cursor), 42);
 
         let path = fixture("recovery");
-        let (turns, _) = delta_since(&path, 1_000_000).unwrap();
-        assert_eq!(turns.len(), 2);
+        let delta = read_delta(&path, 1_000_000, 0).unwrap();
+        assert_eq!(delta.new.len(), 2);
         let _ = std::fs::remove_file(path);
     }
 

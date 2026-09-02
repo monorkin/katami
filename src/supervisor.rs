@@ -1,13 +1,15 @@
 //! The supervisor: keeps the session's terminal honest while agent stays alive
 //! around it.
 //!
-//! The byte stream between the user and claude is never parsed — it's spliced
-//! verbatim. Everything agent learns about the session arrives through hook
-//! events, not through the terminal. One thread pumps stdin into the pty
-//! master; the main loop polls the master and the signal pipe, pumping output
-//! to stdout, mirroring window resizes, and forwarding externally-delivered
-//! SIGTERM/SIGHUP to the child's process group. Ctrl+C needs no forwarding:
-//! in raw mode it travels as a byte for the child's line discipline.
+//! The byte stream between the user and the wrapped tool is never parsed —
+//! it's spliced verbatim. Everything agent learns arrives through hook events
+//! relayed to a unix socket, not through the terminal, so the same supervisor
+//! serves claude, codex, pi, and opencode (and any of them shelling out to
+//! another). One thread pumps stdin into the pty master; the main loop polls
+//! the master and the signal pipe, pumping output to stdout, mirroring window
+//! resizes, and forwarding externally-delivered SIGTERM/SIGHUP to the child's
+//! process group. Ctrl+C needs no forwarding: in raw mode it travels as a
+//! byte for the child's line discipline.
 
 use anyhow::{Context, Result};
 use std::io::{BufReader, ErrorKind, Read, Write};
@@ -19,7 +21,7 @@ use std::thread;
 
 use crate::cards;
 use crate::curator;
-use crate::hook_protocol::{self, HookRequest};
+use crate::hook_protocol::{self, HookRequest, Tool};
 use crate::launches;
 use crate::logs;
 use crate::memory::{Kind, Memory};
@@ -27,13 +29,14 @@ use crate::paths;
 use crate::pty::{self, RawGuard};
 use crate::reviewer;
 use crate::search;
+use crate::transcript;
 
 pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
     let server = HookServer::start(launch_key)?;
     command.env(hook_protocol::SOCKET_ENV_VAR, &server.socket_path);
 
     // Raw mode comes first: if anything later fails, the guard's Drop still
-    // restores the terminal, and claude is never left orphaned behind a
+    // restores the terminal, and the child is never left orphaned behind a
     // half-configured pty
     let raw = RawGuard::enable()?;
     let mut pty = pty::spawn(command)?;
@@ -44,9 +47,21 @@ pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
     pump_output(&pty.master, &signal_pipe, pty.child.id())?;
     drop(raw);
 
-    let status = pty.child.wait().context("could not reap claude")?;
+    let status = pty.child.wait().context("could not reap the child")?;
+    // Some tools fire no reliable end event (opencode has none; pi's is
+    // best-effort). The ledger of every session we saw is the backstop: on
+    // exit, give each one a final review. A claude session that already ran
+    // SessionEnd just re-reviews an empty delta — a no-op.
+    review_seen_sessions(&server.context);
     drop(server);
     Ok(crate::launch::exit_code(&status))
+}
+
+fn review_seen_sessions(context: &ServerContext) {
+    let sessions = context.sessions.lock().unwrap();
+    for seen in sessions.values() {
+        let _ = reviewer::spawn_final_review(&seen.source, &seen.config_dir, seen.cwd.as_deref());
+    }
 }
 
 /// Serves `agent hook` clients for the lifetime of one session. The accept
@@ -55,11 +70,19 @@ pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
 /// 1.5 seconds.
 struct HookServer {
     socket_path: PathBuf,
+    context: std::sync::Arc<ServerContext>,
 }
 
 struct ServerContext {
     launch_key: String,
     launch_recorded: std::sync::atomic::AtomicBool,
+    sessions: std::sync::Mutex<std::collections::HashMap<String, SeenSession>>,
+}
+
+struct SeenSession {
+    source: transcript::Source,
+    cwd: Option<String>,
+    config_dir: PathBuf,
 }
 
 impl HookServer {
@@ -80,17 +103,19 @@ impl HookServer {
         let context = std::sync::Arc::new(ServerContext {
             launch_key,
             launch_recorded: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
+        let accept_context = context.clone();
         thread::spawn(move || {
             for connection in listener.incoming() {
                 if let Ok(stream) = connection {
-                    let context = context.clone();
+                    let context = accept_context.clone();
                     thread::spawn(move || serve_connection(stream, &context));
                 }
             }
         });
 
-        Ok(HookServer { socket_path })
+        Ok(HookServer { socket_path, context })
     }
 }
 
@@ -133,16 +158,35 @@ fn serve_connection(stream: UnixStream, context: &ServerContext) {
         return;
     };
 
-    if !context
-        .launch_recorded
-        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    // Only claude frames carry a config dir, and only claude cares which one
+    // it launched under (the reviewer's auth account, the skills dir)
+    if request.tool == Tool::Claude
+        && let Some(config_dir) = &request.config_dir
+        && !context
+            .launch_recorded
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        let _ = launches::record(&context.launch_key, &request.config_dir);
+        let _ = launches::record(&context.launch_key, config_dir);
     }
+    remember_session(context, &request);
 
     let reply = handle_event(&request);
     let mut writer = stream;
     let _ = hook_protocol::write_reply(&mut writer, &reply);
+}
+
+fn remember_session(context: &ServerContext, request: &HookRequest) {
+    let Some(source) = source_of(request) else {
+        return;
+    };
+    let seen = SeenSession {
+        source,
+        cwd: cwd_of(request).map(str::to_string),
+        config_dir: config_dir(request),
+    };
+    if let Ok(mut sessions) = context.sessions.lock() {
+        sessions.insert(seen.source.cursor_key(), seen);
+    }
 }
 
 fn handle_event(request: &HookRequest) -> serde_json::Value {
@@ -169,20 +213,45 @@ fn dispatch(request: &HookRequest) -> Result<Option<serde_json::Value>> {
 }
 
 fn on_stop(request: &HookRequest) -> Result<Option<serde_json::Value>> {
-    if let Some(transcript) = request.payload["transcript_path"].as_str() {
-        let cwd = request.payload["cwd"].as_str();
-        reviewer::maybe_spawn(transcript, &request.config_dir, cwd)?;
+    if let Some(source) = source_of(request) {
+        reviewer::maybe_spawn(&source, &config_dir(request), cwd_of(request))?;
     }
     Ok(None)
 }
 
 fn on_session_end(request: &HookRequest) -> Result<Option<serde_json::Value>> {
-    if let Some(transcript) = request.payload["transcript_path"].as_str() {
-        let cwd = request.payload["cwd"].as_str();
-        reviewer::spawn_final_review(transcript, &request.config_dir, cwd)?;
+    if let Some(source) = source_of(request) {
+        reviewer::spawn_final_review(&source, &config_dir(request), cwd_of(request))?;
     }
-    curator::maybe_spawn(&request.config_dir)?;
+    curator::maybe_spawn(&config_dir(request))?;
     Ok(None)
+}
+
+/// The transcript a frame refers to. Claude, codex, and pi carry a file path;
+/// opencode carries a session id (its conversation lives in SQLite).
+fn source_of(request: &HookRequest) -> Option<transcript::Source> {
+    match request.tool {
+        Tool::Opencode => request.payload["session_id"]
+            .as_str()
+            .map(|id| transcript::Source::Opencode { session_id: id.to_string() }),
+        tool => request.payload["transcript_path"].as_str().map(|path| {
+            transcript::Source::File { tool, path: PathBuf::from(path) }
+        }),
+    }
+}
+
+fn cwd_of(request: &HookRequest) -> Option<&str> {
+    request.payload["cwd"].as_str()
+}
+
+/// The reviewer and curator need a claude config dir for their `claude -p`
+/// runs; only claude frames carry one, so everything else falls back to the
+/// user's default login.
+fn config_dir(request: &HookRequest) -> PathBuf {
+    request
+        .config_dir
+        .clone()
+        .unwrap_or_else(paths::claude_config_home)
 }
 
 fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> {
@@ -192,7 +261,8 @@ fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> 
     let mut sections = Vec::new();
 
     if let Some(cwd) = request.payload["cwd"].as_str() {
-        let entity = cards::project_entity(Path::new(cwd));
+        let entity = cards::canonical_project_entity(Path::new(cwd));
+        memory.record_alias(&cards::project_entity(Path::new(cwd)), &entity)?;
         for card in all.iter().filter(|it| it.kind == Kind::Card) {
             if card.entity.as_deref() == Some(entity.as_str()) {
                 included.push(card.id);
@@ -208,15 +278,22 @@ fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> 
             ));
         }
     }
-    for pinned in all.iter().filter(|it| it.pinned && !included.contains(&it.id)) {
+    let pinned_ids: Vec<i64> = all
+        .iter()
+        .filter(|it| it.pinned && !included.contains(&it.id))
+        .map(|it| it.id)
+        .collect();
+    for pinned in all.iter().filter(|it| pinned_ids.contains(&it.id)) {
+        included.push(pinned.id);
         sections.push(format!("## {}\n{}", pinned.title, pinned.body.trim()));
     }
 
     if sections.is_empty() {
         return Ok(None);
     }
+    record_deliveries(request, "session_start", included, Vec::new());
     let context = format!("Memories about this project:\n\n{}", sections.join("\n\n"));
-    Ok(Some(additional_context("SessionStart", &context)))
+    Ok(Some(context_reply(&context)))
 }
 
 fn on_user_prompt(request: &HookRequest) -> Result<Option<serde_json::Value>> {
@@ -227,26 +304,31 @@ fn on_user_prompt(request: &HookRequest) -> Result<Option<serde_json::Value>> {
 
     let memory = Memory::open(&paths::memory_dir())?;
     let hits = search::hybrid(&memory, prompt, 5)?;
-    let reply = search::compose_context(&memory, &hits)?
-        .map(|context| additional_context("UserPromptSubmit", &context));
+    let Some(composed) = search::compose_context(&memory, &hits)? else {
+        return Ok(None);
+    };
 
-    // Bookkeeping happens off the reply path — the hook client only waits
-    // 1500ms, and a reviewer holding the write lock must not eat that budget
+    record_deliveries(request, "prompt", composed.full_ids.clone(), composed.pointer_ids.clone());
+    Ok(Some(context_reply(&composed.text)))
+}
+
+/// The delivery manifest is bookkeeping, and bookkeeping happens off the
+/// reply path — the hook client only waits 1500ms, and a reviewer holding
+/// the write lock must not eat that budget.
+fn record_deliveries(request: &HookRequest, event: &'static str, full: Vec<i64>, pointers: Vec<i64>) {
     let session = request.payload["session_id"].as_str().unwrap_or("?").to_string();
-    let titles: Vec<String> = hits
-        .iter()
-        .filter_map(|it| memory.get(it.id).ok().map(|stored| stored.title))
-        .collect();
     thread::spawn(move || {
-        if let Ok(memory) = Memory::open(&paths::memory_dir()) {
-            for title in titles {
-                let _ = memory.record_usage("memory", &title, &session);
-                log_line(&format!("injected [[{title}]] for session={session}"));
-            }
+        let Ok(memory) = Memory::open(&paths::memory_dir()) else {
+            return;
+        };
+        for id in full {
+            let _ = memory.record_delivery(id, &session, event, "full");
+            log_line(&format!("delivered memory {id} in full for session={session}"));
+        }
+        for id in pointers {
+            let _ = memory.record_delivery(id, &session, event, "pointer");
         }
     });
-
-    Ok(reply)
 }
 
 fn on_post_tool_use(request: &HookRequest) -> Result<Option<serde_json::Value>> {
@@ -280,23 +362,18 @@ fn skill_read_from_path(path: &str) -> Option<String> {
     components.get(position + 1).map(|it| it.to_string())
 }
 
-/// Injected context is wrapped in sentinels so the transcript distiller can
-/// strip it back out — otherwise every injection echoes through the reviewer
-/// and the store slowly ingests its own output.
-fn additional_context(event: &str, context: &str) -> serde_json::Value {
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": format!("<agent-memory>\n{context}\n</agent-memory>")
-        }
-    })
+/// The supervisor speaks one canonical reply; each edge (the Rust client for
+/// claude and codex, the TS relays for pi and opencode) formats it into its
+/// tool's native shape and applies the tool's own self-ingestion guard.
+fn context_reply(context: &str) -> serde_json::Value {
+    serde_json::json!({ "context": context })
 }
 
 fn log_event(request: &HookRequest) {
     log_line(&format!(
-        "{} config_dir={} session={}",
+        "{} tool={} session={}",
         request.event,
-        request.config_dir.display(),
+        request.tool.as_str(),
         request.payload["session_id"].as_str().unwrap_or("?")
     ));
 }
