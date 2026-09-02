@@ -50,7 +50,7 @@ pub fn record(key: &str, config_dir: &Path) -> Result<()> {
         key.to_string(),
         Launch {
             config_dir: config_dir.to_path_buf(),
-            updated: crate::timestamp(),
+            updated: crate::clock::timestamp(),
         },
     );
     fsutil::write_json_atomically(&paths::launches_path(), &file)

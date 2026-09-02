@@ -11,16 +11,17 @@
 //! CLAUDE_CONFIG_DIR so the right account's auth pays for it, and with the
 //! hook socket stripped so its own hooks no-op.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::cards;
+use crate::distiller;
 use crate::embeddings;
 use crate::flock;
-use crate::memory::{Kind, Memory, NewObservation};
+use crate::logs;
+use crate::memory::{Kind, Memory, NewMemory};
 use crate::paths;
 use crate::transcript;
 
@@ -56,27 +57,31 @@ struct SkillProposal {
     instructions: String,
 }
 
-/// Called from hook handlers: decides cheaply whether a review is due and
-/// spawns it detached — the hook must return within its timeout.
-pub fn maybe_spawn(
-    transcript_path: &str,
-    config_dir: &Path,
-    cwd: Option<&str>,
-    force: bool,
-) -> Result<()> {
-    let memory = Memory::open(&paths::memory_dir())?;
-    let offset = memory.cursor(transcript_path)?;
-    let (turns, _) = transcript::delta_since(Path::new(transcript_path), offset)?;
-
-    let due = if force {
-        !turns.is_empty()
-    } else {
-        transcript::user_turns(&turns) >= DEBOUNCE_USER_TURNS
-    };
-    if due {
+/// Called on Stop: spawns a detached review once enough of the conversation
+/// has accumulated — the hook must return within its timeout, so the review
+/// itself never runs inline.
+pub fn maybe_spawn(transcript_path: &str, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
+    let turns = unreviewed_turns(transcript_path)?;
+    if transcript::user_turns(&turns) >= DEBOUNCE_USER_TURNS {
         spawn_detached(transcript_path, config_dir, cwd)?;
     }
     Ok(())
+}
+
+/// Called on SessionEnd: the transcript will never fire another event, so
+/// anything unreviewed gets reviewed now, debounce or no debounce.
+pub fn spawn_final_review(transcript_path: &str, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
+    if !unreviewed_turns(transcript_path)?.is_empty() {
+        spawn_detached(transcript_path, config_dir, cwd)?;
+    }
+    Ok(())
+}
+
+fn unreviewed_turns(transcript_path: &str) -> Result<Vec<transcript::Turn>> {
+    let memory = Memory::open(&paths::memory_dir())?;
+    let offset = memory.cursor(transcript_path)?;
+    let (turns, _) = transcript::delta_since(Path::new(transcript_path), offset)?;
+    Ok(turns)
 }
 
 fn spawn_detached(transcript_path: &str, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
@@ -138,8 +143,11 @@ pub fn run(transcript_path: &Path, config_dir: &Path, cwd: Option<&Path>) -> Res
     let source_session = transcript_path
         .file_stem()
         .map(|it| it.to_string_lossy().to_string());
-    let reviewed = review(&input, config_dir, cwd)
-        .and_then(|it| apply(&memory, &it, entity.as_deref(), source_session.as_deref()).map(|()| it));
+    let reviewed = distiller::ask::<Review>(&review_prompt(cwd), &input, config_dir)
+        .and_then(|review| {
+            apply(&memory, &review, entity.as_deref(), source_session.as_deref())?;
+            Ok(review)
+        });
     match reviewed {
         Ok(review) => {
             memory.set_cursor(&transcript_key, new_offset)?;
@@ -166,37 +174,6 @@ pub fn run(transcript_path: &Path, config_dir: &Path, cwd: Option<&Path>) -> Res
             Ok(())
         }
     }
-}
-
-fn review(distilled: &str, config_dir: &Path, cwd: Option<&Path>) -> Result<Review> {
-    let mut command = Command::new("claude");
-    command
-        .args(["-p", &review_prompt(cwd), "--model", "haiku", "--output-format", "json"])
-        .env("CLAUDE_CONFIG_DIR", config_dir)
-        .env_remove("AGENT_HOOK_SOCKET")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    let mut child = command
-        .spawn()
-        .context("could not launch claude — is it on your PATH?")?;
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(distilled.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!("claude exited with {}", output.status);
-    }
-
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("claude's --output-format json envelope did not parse")?;
-    let result = envelope["result"]
-        .as_str()
-        .context("claude's output carried no result field")?;
-    serde_json::from_str(strip_fences(result)).context("the review was not the expected JSON")
 }
 
 /// What the store already knows, prepended to the reviewer's input so it can
@@ -239,7 +216,7 @@ fn apply(
                 }
             }
             let title = single_line(&observation.title);
-            let id = memory.add(&NewObservation {
+            let id = memory.add(&NewMemory {
                 kind: Kind::Observation,
                 entity: observation.entity.clone(),
                 title: title.clone(),
@@ -275,7 +252,7 @@ fn supersede(memory: &Memory, ids: &[i64]) -> Result<()> {
         let stored = memory
             .get(*id)
             .with_context(|| format!("the review superseded id {id}, which doesn't exist"))?;
-        if stored.kind != "observation" || stored.pinned {
+        if stored.kind != Kind::Observation || stored.pinned {
             anyhow::bail!(
                 "the review tried to supersede id {id}, but only unpinned observations can be superseded"
             );
@@ -298,21 +275,8 @@ fn single_line(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn strip_fences(text: &str) -> &str {
-    let trimmed = text.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return trimmed;
-    };
-    let body = rest.split_once('\n').map(|it| it.1).unwrap_or(rest);
-    body.strip_suffix("```").unwrap_or(body).trim()
-}
-
 fn log(message: &str) {
-    let path = paths::logs_dir().join("reviewer.log");
-    let _ = std::fs::create_dir_all(paths::logs_dir());
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {message}", crate::timestamp());
-    }
+    logs::append("reviewer", message);
 }
 
 fn review_prompt(cwd: Option<&Path>) -> String {
@@ -360,12 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn fenced_json_is_unwrapped() {
-        assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
-        assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
-    }
-
-    #[test]
     fn skill_names_that_shape_paths_are_rejected() {
         assert!(valid_skill_name("deploy-check"));
         assert!(valid_skill_name("k8s"));
@@ -378,11 +336,11 @@ mod tests {
 
     #[test]
     fn superseding_archives_only_unpinned_observations() {
-        use crate::memory::{Kind, Memory, NewObservation};
+        use crate::memory::{Kind, Memory, NewMemory};
 
         let memory = Memory::open_in_memory().unwrap();
         let old = memory
-            .add(&NewObservation {
+            .add(&NewMemory {
                 kind: Kind::Observation,
                 entity: None,
                 title: "Old fact".into(),
@@ -392,7 +350,7 @@ mod tests {
             })
             .unwrap();
         let card = memory
-            .add(&NewObservation {
+            .add(&NewMemory {
                 kind: Kind::Card,
                 entity: Some("project:/x".into()),
                 title: "A card".into(),

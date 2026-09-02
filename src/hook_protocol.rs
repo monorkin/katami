@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+/// Where the client finds the supervisor's socket — part of the wire
+/// contract, and doubling as the recursion guard: headless claude runs get
+/// it stripped, so their hooks no-op.
+pub const SOCKET_ENV_VAR: &str = "AGENT_HOOK_SOCKET";
+
 #[derive(Serialize, Deserialize)]
 pub struct HookRequest {
     pub event: String,

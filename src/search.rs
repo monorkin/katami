@@ -166,12 +166,12 @@ fn pointer_line(neighbor: &Stored) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Kind, NewObservation};
+    use crate::memory::{Kind, NewMemory};
 
     fn seeded() -> Memory {
         let memory = Memory::open_in_memory().unwrap();
         memory
-            .add(&NewObservation {
+            .add(&NewMemory {
                 kind: Kind::Observation,
                 entity: Some("project:agent".into()),
                 title: "Supervisor design".into(),
@@ -181,7 +181,7 @@ mod tests {
             })
             .unwrap();
         memory
-            .add(&NewObservation {
+            .add(&NewMemory {
                 kind: Kind::Observation,
                 entity: None,
                 title: "Hook protocol".into(),

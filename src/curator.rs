@@ -1,7 +1,7 @@
 //! The curator: the slow loop that keeps the store from becoming a landfill.
 //!
 //! Sessions and the reviewer only ever add; the curator is the one thing that
-//! consolidates and retires. The mechanical parts are pure Rust — archiving
+//! consolidates and archives. The mechanical parts are pure Rust — archiving
 //! generated skills nobody used, re-embedding memories that predate the
 //! model, pruning links to titles that no longer exist. The reasoning part —
 //! folding an entity's accumulated observations into its card — goes through
@@ -12,42 +12,33 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::cards;
+use crate::clock;
+use crate::distiller;
 use crate::embeddings;
 use crate::flock;
 use crate::fsutil;
-use crate::memory::{Kind, Memory, NewObservation};
+use crate::logs;
+use crate::memory::{Kind, Memory, NewMemory};
 use crate::paths;
 
 const CONSOLIDATE_AT: usize = 3;
 
-pub struct Thresholds {
-    pub archive_skills_after_days: u64,
-}
-
-impl Thresholds {
-    pub fn load() -> Thresholds {
-        let mut thresholds = Thresholds {
-            archive_skills_after_days: 90,
-        };
-        if let Ok(config) = fsutil::read_json(&paths::data_dir().join("config.json"))
-            && let Some(days) = config["archive_skills_after_days"].as_u64()
-        {
-            thresholds.archive_skills_after_days = days;
-        }
-        thresholds
-    }
+fn archive_skills_after_days() -> u64 {
+    fsutil::read_json(&paths::data_dir().join("config.json"))
+        .ok()
+        .and_then(|it| it["archive_skills_after_days"].as_u64())
+        .unwrap_or(90)
 }
 
 pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
     let memory = Memory::open(&paths::memory_dir())?;
     // At most one automatic run per calendar day; `agent memory curate` is always manual
     if let Some(last_run) = memory.state("curator_last_run")?
-        && days_since(&last_run) == 0
+        && clock::days_since(&last_run) == 0
     {
         return Ok(());
     }
@@ -79,9 +70,8 @@ pub fn run(config_dir: &Path) -> Result<()> {
         return Ok(());
     };
     let memory = Memory::open(&paths::memory_dir())?;
-    let thresholds = Thresholds::load();
 
-    archive_unused_skills(&memory, &thresholds)?;
+    archive_unused_skills(&memory)?;
     archive_stale_statuses(&memory)?;
     archive_never_retrieved(&memory)?;
     reembed_missing(&memory)?;
@@ -89,7 +79,7 @@ pub fn run(config_dir: &Path) -> Result<()> {
     cards::render_all(&memory, &paths::memory_dir().join("cards"))?;
     sweep_files(&memory)?;
 
-    memory.set_state("curator_last_run", &crate::timestamp())?;
+    memory.set_state("curator_last_run", &clock::timestamp())?;
     log("curated");
     Ok(())
 }
@@ -97,8 +87,8 @@ pub fn run(config_dir: &Path) -> Result<()> {
 /// A status snapshot nobody refreshed in two weeks is stale by definition —
 /// better silence than confidently wrong context.
 fn archive_stale_statuses(memory: &Memory) -> Result<()> {
-    for status in memory.list()?.iter().filter(|it| it.kind == "status") {
-        if days_since(&status.updated) > 14 {
+    for status in memory.list()?.iter().filter(|it| it.kind == Kind::Status) {
+        if clock::days_since(&status.updated) > 14 {
             memory.archive(status.id)?;
             log(&format!("archived stale status for {}", status.entity.as_deref().unwrap_or("?")));
         }
@@ -108,7 +98,7 @@ fn archive_stale_statuses(memory: &Memory) -> Result<()> {
 
 fn archive_never_retrieved(memory: &Memory) -> Result<()> {
     for observation in memory.unretrieved_observations()? {
-        if days_since(&observation.updated) > 90 {
+        if clock::days_since(&observation.updated) > 90 {
             memory.archive(observation.id)?;
             log(&format!("archived never-retrieved [[{}]]", observation.title));
         }
@@ -125,7 +115,7 @@ fn sweep_files(memory: &Memory) -> Result<()> {
     memory.prune_cursors(|path| std::path::Path::new(path).exists())?;
     memory.connection.execute(
         "DELETE FROM usage WHERE used_at < ?1",
-        [days_ago_timestamp(180)],
+        [clock::timestamp_days_ago(180)],
     )?;
     Ok(())
 }
@@ -150,21 +140,13 @@ fn remove_older_than(directory: &Path, prefix: &str, days: u64) -> Result<()> {
     Ok(())
 }
 
-fn days_ago_timestamp(days: u64) -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
-        .as_secs()
-        .saturating_sub(days * 86_400);
-    crate::format_epoch_seconds(seconds)
-}
-
-fn archive_unused_skills(memory: &Memory, thresholds: &Thresholds) -> Result<()> {
+fn archive_unused_skills(memory: &Memory) -> Result<()> {
+    let archive_after = archive_skills_after_days();
     for skill in memory.generated_skills()? {
         let last_activity = memory
             .last_used("skill", &format!("agent-{}", skill.name))?
             .unwrap_or(skill.created.clone());
-        if days_since(&last_activity) > thresholds.archive_skills_after_days {
+        if clock::days_since(&last_activity) > archive_after {
             memory.archive_generated_skill(&skill.name)?;
             log(&format!("archived unused skill {}", skill.name));
         }
@@ -210,7 +192,7 @@ fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
         ));
     }
 
-    let consolidation = ask(&input, config_dir)?;
+    let consolidation: Consolidation = distiller::ask(CONSOLIDATE_PROMPT, &input, config_dir)?;
     let valid_ids: Vec<i64> = observations.iter().map(|it| it.id).collect();
     if consolidation.folded_ids.iter().any(|it| !valid_ids.contains(it)) {
         bail!("the consolidation named observation ids that don't belong to {entity}");
@@ -232,10 +214,10 @@ fn apply(
             memory.update_body(id, &consolidation.card_body)?;
             id
         }
-        None => memory.add(&NewObservation {
+        None => memory.add(&NewMemory {
             kind: Kind::Card,
             entity: Some(entity.to_string()),
-            title: card_title(entity),
+            title: cards::entity_name(entity).to_string(),
             body: consolidation.card_body.clone(),
             links: cards::extract_links(&consolidation.card_body),
             source_session: None,
@@ -249,65 +231,8 @@ fn apply(
     Ok(())
 }
 
-fn card_title(entity: &str) -> String {
-    entity.split_once(':').map(|it| it.1).unwrap_or(entity).to_string()
-}
-
-fn ask(input: &str, config_dir: &Path) -> Result<Consolidation> {
-    let mut command = Command::new("claude");
-    command
-        .args(["-p", CONSOLIDATE_PROMPT, "--model", "haiku", "--output-format", "json"])
-        .env("CLAUDE_CONFIG_DIR", config_dir)
-        .env_remove("AGENT_HOOK_SOCKET")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    let mut child = command
-        .spawn()
-        .context("could not launch claude — is it on your PATH?")?;
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(input.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!("claude exited with {}", output.status);
-    }
-
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("claude's --output-format json envelope did not parse")?;
-    let result = envelope["result"]
-        .as_str()
-        .context("claude's output carried no result field")?;
-    serde_json::from_str(crate::reviewer::strip_fences(result))
-        .context("the consolidation was not the expected JSON")
-}
-
-fn days_since(timestamp: &str) -> u64 {
-    let today = crate::timestamp();
-    match (parse_days(timestamp), parse_days(&today)) {
-        (Some(then), Some(now)) if now >= then => now - then,
-        _ => 0,
-    }
-}
-
-fn parse_days(timestamp: &str) -> Option<u64> {
-    let date = timestamp.get(0..10)?;
-    let mut parts = date.split('-');
-    let year: u64 = parts.next()?.parse().ok()?;
-    let month: u64 = parts.next()?.parse().ok()?;
-    let day: u64 = parts.next()?.parse().ok()?;
-    Some(year * 372 + month * 31 + day)
-}
-
 fn log(message: &str) {
-    let path = paths::logs_dir().join("curator.log");
-    let _ = std::fs::create_dir_all(paths::logs_dir());
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {message}", crate::timestamp());
-    }
+    logs::append("curator", message);
 }
 
 const CONSOLIDATE_PROMPT: &str = r#"You maintain one entity card in a memory system. Stdin has the card's current body (possibly absent) and a list of dated observations about the same entity, each tagged [id N].
@@ -319,20 +244,3 @@ Reply with ONLY this JSON, no prose:
 
 folded_ids lists every observation id you fully absorbed into the card. Leave an id out only if the observation should stay standalone."#;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn day_math_across_the_iso_timestamps_we_write() {
-        assert_eq!(days_since(&crate::timestamp()), 0);
-        assert!(days_since("2020-01-01T00:00:00Z") > 365);
-        assert_eq!(days_since("not-a-date"), 0);
-    }
-
-    #[test]
-    fn card_titles_drop_the_entity_prefix() {
-        assert_eq!(card_title("project:/home/x/app"), "/home/x/app");
-        assert_eq!(card_title("person:Jason"), "Jason");
-    }
-}

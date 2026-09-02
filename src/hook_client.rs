@@ -11,10 +11,9 @@ use std::io::{BufReader, Read};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use crate::hook_protocol::{self, HookRequest};
+use crate::hook_protocol::{self, HookRequest, SOCKET_ENV_VAR};
 use crate::paths;
 
-const SOCKET_ENV_VAR: &str = "AGENT_HOOK_SOCKET";
 const TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub fn run(event: &str) -> Result<()> {

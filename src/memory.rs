@@ -11,13 +11,13 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::timestamp;
+use crate::clock::timestamp;
 
 pub struct Memory {
     pub connection: Connection,
 }
 
-pub struct NewObservation {
+pub struct NewMemory {
     pub kind: Kind,
     pub entity: Option<String>,
     pub title: String,
@@ -43,11 +43,36 @@ impl Kind {
     }
 }
 
-pub struct UsageStat {
-    pub kind: String,
-    pub name: String,
+impl std::fmt::Display for Kind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+impl rusqlite::types::FromSql for Kind {
+    fn column_result(value: rusqlite::types::ValueRef) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "observation" => Ok(Kind::Observation),
+            "card" => Ok(Kind::Card),
+            "status" => Ok(Kind::Status),
+            other => Err(rusqlite::types::FromSqlError::Other(
+                format!("unknown memory kind '{other}'").into(),
+            )),
+        }
+    }
+}
+
+pub struct OverviewRow {
+    pub stored: Stored,
     pub uses: i64,
-    pub last_used: String,
+    pub last_used: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum ListFilter {
+    Active,
+    All,
+    ArchivedOnly,
 }
 
 pub struct GeneratedSkill {
@@ -59,7 +84,7 @@ pub struct GeneratedSkill {
 
 pub struct Stored {
     pub id: i64,
-    pub kind: String,
+    pub kind: Kind,
     pub entity: Option<String>,
     pub title: String,
     pub body: String,
@@ -100,10 +125,16 @@ impl Memory {
             let version: i64 = memory
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            if version >= 1 {
-                return Ok(());
+            if version == 0 {
+                memory.create_schema()?;
             }
-            memory.create_schema()
+            if version == 1 {
+                // The table held reviewer state from day one — the old name lied
+                memory.connection.execute_batch(
+                    "ALTER TABLE curator_state RENAME TO state; PRAGMA user_version = 2;",
+                )?;
+            }
+            Ok(())
         })
     }
 
@@ -180,7 +211,7 @@ impl Memory {
                 updated TEXT NOT NULL
             );
 
-            CREATE TABLE curator_state (
+            CREATE TABLE state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
@@ -199,13 +230,13 @@ impl Memory {
                 vector BLOB NOT NULL
             );
 
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             ",
         )?;
         Ok(())
     }
 
-    pub fn add(&self, observation: &NewObservation) -> Result<i64> {
+    pub fn add(&self, observation: &NewMemory) -> Result<i64> {
         let now = timestamp();
         self.connection.execute(
             "INSERT INTO memories (kind, entity, title, body, created, updated, source_session)
@@ -338,10 +369,10 @@ impl Memory {
         if let Some(existing) = self.status_for_entity(entity)? {
             self.update_body(existing.id, body)
         } else {
-            self.add(&NewObservation {
+            self.add(&NewMemory {
                 kind: Kind::Status,
                 entity: Some(entity.to_string()),
-                title: format!("Current state of {}", entity.split_once(':').map_or(entity, |it| it.1)),
+                title: format!("Current state of {}", crate::cards::entity_name(entity)),
                 body: body.to_string(),
                 links: Vec::new(),
                 source_session: None,
@@ -410,12 +441,36 @@ impl Memory {
         Ok(())
     }
 
-    pub fn restore(&self, id: i64) -> Result<()> {
+    pub fn unarchive(&self, id: i64) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET archived = 0, updated = ?2 WHERE id = ?1",
             rusqlite::params![id, timestamp()],
         )?;
         Ok(())
+    }
+
+    /// The listing the CLI shows: every row with its lifetime injection count
+    /// and when it was last pulled into a session.
+    pub fn overview(&self, filter: ListFilter) -> Result<Vec<OverviewRow>> {
+        let condition = match filter {
+            ListFilter::Active => "m.archived = 0",
+            ListFilter::All => "1 = 1",
+            ListFilter::ArchivedOnly => "m.archived = 1",
+        };
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated,
+                    (SELECT COUNT(*) FROM usage u WHERE u.kind = 'memory' AND u.name = m.title),
+                    (SELECT MAX(used_at) FROM usage u WHERE u.kind = 'memory' AND u.name = m.title)
+             FROM memories m WHERE {condition} ORDER BY m.updated DESC"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok(OverviewRow {
+                stored: row_to_stored(row)?,
+                uses: row.get(8)?,
+                last_used: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn update(&self, id: i64, title: &str, body: &str, entity: Option<&str>) -> Result<()> {
@@ -445,23 +500,6 @@ impl Memory {
              WHERE m.archived = 0 AND m.kind != 'status' AND e.memory_id IS NULL",
         )?;
         let rows = statement.query_map([model], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    pub fn usage_stats(&self) -> Result<Vec<UsageStat>> {
-        let mut statement = self.connection.prepare(
-            "SELECT kind, name, COUNT(*), MAX(used_at) FROM usage
-             GROUP BY kind, name
-             ORDER BY kind, COUNT(*) DESC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(UsageStat {
-                kind: row.get(0)?,
-                name: row.get(1)?,
-                uses: row.get(2)?,
-                last_used: row.get(3)?,
-            })
-        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -542,7 +580,7 @@ impl Memory {
         Ok(self
             .connection
             .query_row(
-                "SELECT value FROM curator_state WHERE key = ?1",
+                "SELECT value FROM state WHERE key = ?1",
                 [key],
                 |row| row.get(0),
             )
@@ -551,7 +589,7 @@ impl Memory {
 
     pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO curator_state (key, value) VALUES (?1, ?2)
+            "INSERT INTO state (key, value) VALUES (?1, ?2)
              ON CONFLICT (key) DO UPDATE SET value = ?2",
             rusqlite::params![key, value],
         )?;
@@ -560,7 +598,7 @@ impl Memory {
 
     pub fn clear_state(&self, key: &str) -> Result<()> {
         self.connection
-            .execute("DELETE FROM curator_state WHERE key = ?1", [key])?;
+            .execute("DELETE FROM state WHERE key = ?1", [key])?;
         Ok(())
     }
 
@@ -616,7 +654,7 @@ mod tests {
     fn adding_and_linking_memories() {
         let memory = Memory::open_in_memory().unwrap();
         let first = memory
-            .add(&NewObservation {
+            .add(&NewMemory {
                 kind: Kind::Observation,
                 entity: Some("project:ax".into()),
                 title: "ax uses flocks".into(),
@@ -626,7 +664,7 @@ mod tests {
             })
             .unwrap();
         let second = memory
-            .add(&NewObservation {
+            .add(&NewMemory {
                 kind: Kind::Observation,
                 entity: None,
                 title: "agent reuses ax idioms".into(),
@@ -657,7 +695,7 @@ mod tests {
             .list()
             .unwrap()
             .into_iter()
-            .filter(|it| it.kind == "status")
+            .filter(|it| it.kind == Kind::Status)
             .collect();
         assert_eq!(statuses.len(), 1);
     }

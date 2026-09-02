@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use crate::cards;
 use crate::embeddings;
 use crate::fsutil;
-use crate::memory::{Kind, Memory, NewObservation};
+use crate::memory::{Kind, ListFilter, Memory, NewMemory};
 use crate::paths;
 use crate::search;
 
@@ -26,7 +26,7 @@ pub fn add(
     }
 
     let kind = if card { Kind::Card } else { Kind::Observation };
-    let id = memory.add(&NewObservation {
+    let id = memory.add(&NewMemory {
         kind,
         entity,
         title: title.to_string(),
@@ -55,9 +55,16 @@ pub fn search(query: &str) -> Result<()> {
         return Ok(());
     }
 
+    println!("{:>4}  {:<10}  {:<11}  title", "id", "updated", "kind");
     for hit in hits {
         let stored = memory.get(hit.id)?;
-        println!("{:>4}  {}  {}", stored.id, stored.updated, stored.title);
+        println!(
+            "{:>4}  {:<10}  {:<11}  {}",
+            stored.id,
+            &stored.updated[..10],
+            stored.kind,
+            stored.title
+        );
     }
     Ok(())
 }
@@ -85,23 +92,37 @@ pub fn show(id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn list() -> Result<()> {
+pub fn list(filter: ListFilter) -> Result<()> {
     let memory = open()?;
-    let all = memory.list()?;
-    if all.is_empty() {
-        println!("No memories yet — sessions will add them, or use `agent memory add`.");
+    let rows = memory.overview(filter)?;
+    if rows.is_empty() {
+        println!("No memories here — sessions will add them, or use `agent memory add`.");
         return Ok(());
     }
 
-    for stored in all {
-        let mut flags = String::new();
-        if stored.kind == "card" {
-            flags.push_str(" [card]");
+    println!(
+        "{:>4}  {:<10}  {:<11}  {:>5}  {:<10}  title",
+        "id", "updated", "kind", "uses", "last used"
+    );
+    for row in rows {
+        let mut title = row.stored.title.clone();
+        if row.stored.pinned {
+            title.push_str(" [pinned]");
         }
-        if stored.pinned {
-            flags.push_str(" [pinned]");
+        if row.stored.archived {
+            title.push_str(" [archived]");
         }
-        println!("{:>4}  {}  {}{flags}", stored.id, stored.updated, stored.title);
+        let last_used = match &row.last_used {
+            Some(timestamp) => &timestamp[..10],
+            None => "never",
+        };
+        println!(
+            "{:>4}  {:<10}  {:<11}  {:>5}  {last_used:<10}  {title}",
+            row.stored.id,
+            &row.stored.updated[..10],
+            row.stored.kind,
+            row.uses
+        );
     }
     Ok(())
 }
@@ -110,14 +131,17 @@ pub fn archive(id: i64) -> Result<()> {
     let memory = open()?;
     let stored = memory.get(id)?;
     memory.archive(id)?;
-    println!("Archived {id}: {} — restore with `agent memory restore {id}`", stored.title);
+    println!(
+        "Archived {id}: {} — bring it back with `agent memory unarchive {id}`",
+        stored.title
+    );
     Ok(())
 }
 
-pub fn restore(id: i64) -> Result<()> {
+pub fn unarchive(id: i64) -> Result<()> {
     let memory = open()?;
-    memory.restore(id)?;
-    println!("Restored {id}: {}", memory.get(id)?.title);
+    memory.unarchive(id)?;
+    println!("Unarchived {id}: {}", memory.get(id)?.title);
     Ok(())
 }
 
@@ -135,7 +159,7 @@ pub fn edit(id: i64) -> Result<()> {
     memory.update(id, &title, &body, entity.as_deref())?;
     memory.replace_links(id, &cards::extract_links(&body))?;
     embeddings::embed_into(&memory, id, &format!("{title}\n{body}"))?;
-    if stored.kind == "card" {
+    if stored.kind == Kind::Card {
         cards::render(&memory.get(id)?, &paths::memory_dir().join("cards"))?;
     }
     println!("Updated {id}: {title}");
@@ -191,24 +215,6 @@ fn launch_editor(path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("could not launch {editor} — set $EDITOR"))?;
     if !status.success() {
         anyhow::bail!("{editor} exited with {status}; the memory was not changed");
-    }
-    Ok(())
-}
-
-pub fn stats() -> Result<()> {
-    let memory = open()?;
-    let stats = memory.usage_stats()?;
-    if stats.is_empty() {
-        println!("Nothing used yet — stats appear once sessions inject memories or invoke skills.");
-        return Ok(());
-    }
-
-    println!("{:>5}  {:<20}  {:<8}  name", "uses", "last used", "kind");
-    for stat in stats {
-        println!(
-            "{:>5}  {:<20}  {:<8}  {}",
-            stat.uses, stat.last_used, stat.kind, stat.name
-        );
     }
     Ok(())
 }

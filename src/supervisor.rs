@@ -10,7 +10,6 @@
 //! in raw mode it travels as a byte for the child's line discipline.
 
 use anyhow::{Context, Result};
-use std::fs::OpenOptions;
 use std::io::{BufReader, ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -22,17 +21,16 @@ use crate::cards;
 use crate::curator;
 use crate::hook_protocol::{self, HookRequest};
 use crate::launches;
-use crate::memory::Memory;
+use crate::logs;
+use crate::memory::{Kind, Memory};
 use crate::paths;
 use crate::pty::{self, RawGuard};
 use crate::reviewer;
 use crate::search;
 
-pub const SOCKET_ENV_VAR: &str = "AGENT_HOOK_SOCKET";
-
 pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
     let server = HookServer::start(launch_key)?;
-    command.env(SOCKET_ENV_VAR, &server.socket_path);
+    command.env(hook_protocol::SOCKET_ENV_VAR, &server.socket_path);
 
     // Raw mode comes first: if anything later fails, the guard's Drop still
     // restores the terminal, and claude is never left orphaned behind a
@@ -48,7 +46,7 @@ pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
 
     let status = pty.child.wait().context("could not reap claude")?;
     drop(server);
-    Ok(exit_code(&status))
+    Ok(crate::launch::exit_code(&status))
 }
 
 /// Serves `agent hook` clients for the lifetime of one session. The accept
@@ -164,20 +162,26 @@ fn dispatch(request: &HookRequest) -> Result<Option<serde_json::Value>> {
         "SessionStart" => on_session_start(request),
         "UserPromptSubmit" => on_user_prompt(request),
         "PostToolUse" => on_post_tool_use(request),
-        "Stop" => on_stop(request, false),
-        "SessionEnd" => on_stop(request, true),
+        "Stop" => on_stop(request),
+        "SessionEnd" => on_session_end(request),
         _ => Ok(None),
     }
 }
 
-fn on_stop(request: &HookRequest, force: bool) -> Result<Option<serde_json::Value>> {
+fn on_stop(request: &HookRequest) -> Result<Option<serde_json::Value>> {
     if let Some(transcript) = request.payload["transcript_path"].as_str() {
         let cwd = request.payload["cwd"].as_str();
-        reviewer::maybe_spawn(transcript, &request.config_dir, cwd, force)?;
+        reviewer::maybe_spawn(transcript, &request.config_dir, cwd)?;
     }
-    if force {
-        curator::maybe_spawn(&request.config_dir)?;
+    Ok(None)
+}
+
+fn on_session_end(request: &HookRequest) -> Result<Option<serde_json::Value>> {
+    if let Some(transcript) = request.payload["transcript_path"].as_str() {
+        let cwd = request.payload["cwd"].as_str();
+        reviewer::spawn_final_review(transcript, &request.config_dir, cwd)?;
     }
+    curator::maybe_spawn(&request.config_dir)?;
     Ok(None)
 }
 
@@ -189,7 +193,7 @@ fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> 
 
     if let Some(cwd) = request.payload["cwd"].as_str() {
         let entity = cards::project_entity(Path::new(cwd));
-        for card in all.iter().filter(|it| it.kind == "card") {
+        for card in all.iter().filter(|it| it.kind == Kind::Card) {
             if card.entity.as_deref() == Some(entity.as_str()) {
                 included.push(card.id);
                 sections.push(format!("## {}\n{}", card.title, card.body.trim()));
@@ -298,13 +302,7 @@ fn log_event(request: &HookRequest) {
 }
 
 fn log_line(message: &str) {
-    let path = paths::logs_dir().join(format!("supervisor-{}.log", std::process::id()));
-    if std::fs::create_dir_all(paths::logs_dir()).is_err() {
-        return;
-    }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {message}", crate::timestamp());
-    }
+    logs::append(&format!("supervisor-{}", std::process::id()), message);
 }
 
 fn spawn_stdin_pump(master: &OwnedFd) -> Result<()> {
@@ -435,13 +433,3 @@ fn write_all_to_fd(fd: &OwnedFd, mut bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn exit_code(status: &std::process::ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    if let Some(code) = status.code() {
-        code
-    } else if let Some(signal) = status.signal() {
-        128 + signal
-    } else {
-        1
-    }
-}

@@ -40,7 +40,7 @@ pub fn run(claude_cmd: &str, claude_args: &[String], exec: bool) -> Result<()> {
         // No supervisor here, so an inherited socket from an outer supervised
         // session must not leak in — the inner session's hooks would relay to
         // the wrong server
-        command.env_remove(supervisor::SOCKET_ENV_VAR);
+        command.env_remove(crate::hook_protocol::SOCKET_ENV_VAR);
         let status = command
             .status()
             .with_context(|| format!("could not launch {claude_cmd} — is it on your PATH?"))?;
@@ -103,7 +103,7 @@ fn extract_user_settings(claude_args: &[String]) -> Result<(Vec<String>, Option<
     Ok((remaining, settings))
 }
 
-fn exit_code(status: &std::process::ExitStatus) -> i32 {
+pub fn exit_code(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     if let Some(code) = status.code() {
         code

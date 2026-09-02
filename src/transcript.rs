@@ -131,8 +131,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn fixture() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("agent-transcript-{}.jsonl", std::process::id()));
+    fn fixture(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("agent-transcript-{name}-{}.jsonl", std::process::id()));
         let contents = concat!(
             r#"{"type":"user","message":{"role":"user","content":"I prefer rebase over merge"}}"#, "\n",
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#, "\n",
@@ -145,7 +146,7 @@ mod tests {
 
     #[test]
     fn deltas_skip_tool_blocks_and_incomplete_lines() {
-        let path = fixture();
+        let path = fixture("deltas");
         let (turns, offset) = delta_since(&path, 0).unwrap();
 
         assert_eq!(turns.len(), 2);
@@ -166,7 +167,7 @@ mod tests {
         assert!(turns.is_empty());
         assert_eq!(offset, 42);
 
-        let path = fixture();
+        let path = fixture("recovery");
         let (turns, _) = delta_since(&path, 1_000_000).unwrap();
         assert_eq!(turns.len(), 2);
         let _ = std::fs::remove_file(path);

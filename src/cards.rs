@@ -30,7 +30,7 @@ pub fn extract_links(body: &str) -> Vec<String> {
 }
 
 pub fn render_all(memory: &Memory, cards_dir: &Path) -> Result<()> {
-    for card in memory.list()?.iter().filter(|it| it.kind == "card") {
+    for card in memory.list()?.iter().filter(|it| it.kind == crate::memory::Kind::Card) {
         render(card, cards_dir)?;
     }
     Ok(())
@@ -64,6 +64,12 @@ pub fn project_entity(cwd: &Path) -> String {
     format!("project:{}", cwd.display())
 }
 
+/// The human half of an entity string: `project:/x/app` → `/x/app`,
+/// `person:Jason` → `Jason`.
+pub fn entity_name(entity: &str) -> &str {
+    entity.split_once(':').map_or(entity, |it| it.1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +83,12 @@ mod tests {
     #[test]
     fn slugs_flatten_punctuation_and_case() {
         assert_eq!(slug("Stanko's ax — profile #2"), "stanko-s-ax-profile-2");
+    }
+
+    #[test]
+    fn entity_names_drop_the_kind_prefix() {
+        assert_eq!(entity_name("project:/home/x/app"), "/home/x/app");
+        assert_eq!(entity_name("person:Jason"), "Jason");
+        assert_eq!(entity_name("bare"), "bare");
     }
 }

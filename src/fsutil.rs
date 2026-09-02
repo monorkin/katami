@@ -1,3 +1,8 @@
+//! File writes that either land whole or not at all: content goes to a
+//! sibling temp file and renames into place, so a crashed writer never
+//! leaves a half-written overlay or card. Files are 0600 because overlays
+//! can embed the user's own settings.
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs;

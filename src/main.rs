@@ -1,6 +1,8 @@
 mod cards;
+mod clock;
 mod completions;
 mod curator;
+mod distiller;
 mod embeddings;
 mod flock;
 mod fsutil;
@@ -8,6 +10,8 @@ mod hook_client;
 mod hook_protocol;
 mod launch;
 mod launches;
+mod log_cli;
+mod logs;
 mod memory;
 mod memory_cli;
 mod overlay;
@@ -21,7 +25,6 @@ mod virtual_skills;
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use usage::{Cli, Subcommands};
 
 /// Supervisor for Claude Code: wraps a claude launch and learns from it
@@ -56,11 +59,20 @@ enum Command {
         #[usage(long)]
         cwd: Option<PathBuf>,
     },
-    /// Consolidate memories and retire unused skills (spawned by the supervisor)
+    /// Consolidate memories and archive unused skills (spawned by the supervisor)
     #[usage(hide = true)]
     Curate {
         #[usage(long)]
         config_dir: PathBuf,
+    },
+    /// Show what the supervisor, reviewer, and curator have been doing
+    Log {
+        /// Number of recent lines to show
+        #[usage(long, default = "50")]
+        lines: usize,
+        /// Keep printing new activity as it happens
+        #[usage(long, short = 'f')]
+        follow: bool,
     },
     /// Inspect and manage the memory store
     Memory {
@@ -96,17 +108,22 @@ enum MemoryCommand {
     Show { id: i64 },
     /// Open a memory in $EDITOR
     Edit { id: i64 },
-    /// Retire a memory so it stops being injected
+    /// Archive a memory so it stops being injected
     Archive { id: i64 },
     /// Bring an archived memory back
-    Restore { id: i64 },
-    /// List all memories
-    List,
-    /// Show how often memories were injected and skills invoked
-    Stats,
+    Unarchive { id: i64 },
+    /// List memories with their usage counts
+    List {
+        /// Include archived memories
+        #[usage(long)]
+        with_archived: bool,
+        /// Show only archived memories
+        #[usage(long)]
+        archived: bool,
+    },
     /// Download the embedding model that powers semantic search
     PullModels,
-    /// Consolidate observations into cards and retire unused skills now
+    /// Consolidate observations into cards and archive unused skills now
     Curate,
 }
 
@@ -148,6 +165,7 @@ fn run(cli: Cli) -> Result<()> {
             cwd,
         }) => reviewer::run(&transcript, &config_dir, cwd.as_deref()),
         Some(Command::Curate { config_dir }) => curator::run(&config_dir),
+        Some(Command::Log { lines, follow }) => log_cli::print(lines, follow),
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Add {
                 title,
@@ -160,9 +178,20 @@ fn run(cli: Cli) -> Result<()> {
             MemoryCommand::Show { id } => memory_cli::show(id),
             MemoryCommand::Edit { id } => memory_cli::edit(id),
             MemoryCommand::Archive { id } => memory_cli::archive(id),
-            MemoryCommand::Restore { id } => memory_cli::restore(id),
-            MemoryCommand::List => memory_cli::list(),
-            MemoryCommand::Stats => memory_cli::stats(),
+            MemoryCommand::Unarchive { id } => memory_cli::unarchive(id),
+            MemoryCommand::List {
+                with_archived,
+                archived,
+            } => {
+                let filter = if archived {
+                    memory::ListFilter::ArchivedOnly
+                } else if with_archived {
+                    memory::ListFilter::All
+                } else {
+                    memory::ListFilter::Active
+                };
+                memory_cli::list(filter)
+            }
             MemoryCommand::PullModels => embeddings::pull(),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),
         },
@@ -174,37 +203,3 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-pub fn timestamp() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
-        .as_secs();
-    format_epoch_seconds(seconds)
-}
-
-pub fn format_epoch_seconds(seconds: u64) -> String {
-    let days_since_epoch = seconds / 86_400;
-    let (year, month, day) = civil_date(days_since_epoch);
-    let hour = seconds / 3600 % 24;
-    let minute = seconds / 60 % 60;
-    let second = seconds % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-fn civil_date(days_since_epoch: u64) -> (u64, u64, u64) {
-    let days = days_since_epoch + 719_468;
-    let era = days / 146_097;
-    let day_of_era = days % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
-}
