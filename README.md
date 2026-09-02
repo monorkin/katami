@@ -26,7 +26,7 @@ omarchy-mise-install github:monorkin/katami katami
 Then, once:
 
 ```bash
-katami memory pull-models   # ~30MB, enables semantic search
+katami setup   # shell completion + the semantic-search model (~30MB)
 ```
 
 ## Usage

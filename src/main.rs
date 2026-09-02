@@ -20,11 +20,13 @@ mod pty;
 mod relays;
 mod reviewer;
 mod search;
+mod setup;
 mod supervisor;
 mod transcript;
 mod transcript_codex;
 mod transcript_opencode;
 mod transcript_pi;
+mod upgrade;
 mod virtual_skills;
 
 use anyhow::Result;
@@ -87,6 +89,13 @@ enum Command {
         /// Keep printing new activity as it happens
         #[usage(long, short = 'f')]
         follow: bool,
+    },
+    /// Install shell completion and the semantic-search model
+    Setup,
+    /// Upgrade a mise install to the latest release
+    Upgrade {
+        /// Target a specific release instead of the latest
+        version: Option<String>,
     },
     /// Inspect and manage the memory store
     Memory {
@@ -173,13 +182,15 @@ enum ShellCompletionCommand {
 
 /// The reserved words that name a katami subcommand rather than a coding tool
 /// to supervise. Anything else in the first position is a launcher.
-const SUBCOMMANDS: [&str; 8] = [
+const SUBCOMMANDS: [&str; 10] = [
     "hook",
     "review",
     "relays",
     "curate",
     "log",
     "memory",
+    "setup",
+    "upgrade",
     "shell-completion",
     "help",
 ];
@@ -218,6 +229,8 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Curate { config_dir } => curator::run(&config_dir),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
+        Command::Setup => setup::run(),
+        Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::Memory { command } => match command {
             MemoryCommand::Add {
                 title,
