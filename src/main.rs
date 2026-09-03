@@ -151,6 +151,12 @@ enum MemoryCommand {
         /// Show only archived memories
         #[usage(long)]
         archived: bool,
+        /// Show only these kinds, comma-separated: observation, card, status
+        #[usage(long)]
+        kinds: Option<String>,
+        /// Order by these columns, comma-separated, each optionally followed by asc or desc: "last_used desc, uses desc"
+        #[usage(long)]
+        sort_by: Option<String>,
     },
     /// Download the embedding model that powers semantic search
     PullModels,
@@ -247,6 +253,8 @@ fn run(cli: Cli) -> Result<()> {
             MemoryCommand::List {
                 with_archived,
                 archived,
+                kinds,
+                sort_by,
             } => {
                 let filter = if archived {
                     memory::ListFilter::ArchivedOnly
@@ -255,7 +263,7 @@ fn run(cli: Cli) -> Result<()> {
                 } else {
                     memory::ListFilter::Active
                 };
-                memory_cli::list(filter)
+                memory_cli::list(filter, kinds.as_deref(), sort_by.as_deref())
             }
             MemoryCommand::PullModels => embeddings::pull(),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),

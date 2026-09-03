@@ -42,7 +42,7 @@ pub const CLASSES: [&str; 7] = [
 
 pub const RETIRABLE_CLASSES: [&str; 2] = ["history", "reference"];
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Kind {
     Observation,
     Card,
@@ -50,6 +50,15 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub fn parse(name: &str) -> Option<Kind> {
+        match name {
+            "observation" => Some(Kind::Observation),
+            "card" => Some(Kind::Card),
+            "status" => Some(Kind::Status),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Observation => "observation",
@@ -184,6 +193,43 @@ pub enum ListFilter {
     Active,
     All,
     ArchivedOnly,
+}
+
+/// What `memory list` shows and in what order. The sort is a list of typed
+/// keys, never user text, so the ORDER BY is assembled from fixed fragments.
+pub struct Listing {
+    pub filter: ListFilter,
+    pub kinds: Vec<Kind>,
+    pub order: Vec<SortKey>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SortKey {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SortColumn {
+    Id,
+    Updated,
+    Kind,
+    Uses,
+    LastUsed,
+    Title,
+}
+
+impl SortColumn {
+    fn as_sql(self) -> &'static str {
+        match self {
+            SortColumn::Id => "m.id",
+            SortColumn::Updated => "m.updated",
+            SortColumn::Kind => "m.kind",
+            SortColumn::Uses => "uses",
+            SortColumn::LastUsed => "last_used",
+            SortColumn::Title => "m.title COLLATE NOCASE",
+        }
+    }
 }
 
 pub struct GeneratedSkill {
@@ -656,17 +702,39 @@ impl Memory {
 
     /// The listing the CLI shows: every row with its lifetime injection count
     /// and when it was last pulled into a session.
-    pub fn overview(&self, filter: ListFilter) -> Result<Vec<OverviewRow>> {
-        let condition = match filter {
-            ListFilter::Active => "m.archived = 0",
-            ListFilter::All => "1 = 1",
-            ListFilter::ArchivedOnly => "m.archived = 1",
-        };
+    pub fn overview(&self, listing: &Listing) -> Result<Vec<OverviewRow>> {
+        let mut conditions = vec![match listing.filter {
+            ListFilter::Active => "m.archived = 0".to_string(),
+            ListFilter::All => "1 = 1".to_string(),
+            ListFilter::ArchivedOnly => "m.archived = 1".to_string(),
+        }];
+        if !listing.kinds.is_empty() {
+            let kinds: Vec<String> = listing.kinds.iter().map(|it| format!("'{}'", it.as_str())).collect();
+            conditions.push(format!("m.kind IN ({})", kinds.join(", ")));
+        }
+
+        let mut order: Vec<String> = listing
+            .order
+            .iter()
+            .map(|key| {
+                if key.descending {
+                    format!("{} DESC", key.column.as_sql())
+                } else {
+                    format!("{} ASC", key.column.as_sql())
+                }
+            })
+            .collect();
+        if order.is_empty() {
+            order.push("m.updated DESC".to_string());
+        }
+
         let mut statement = self.connection.prepare(&format!(
             "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated,
-                    (SELECT COUNT(*) FROM memory_deliveries d WHERE d.memory_id = m.id),
-                    (SELECT MAX(delivered_at) FROM memory_deliveries d WHERE d.memory_id = m.id)
-             FROM memories m WHERE {condition} ORDER BY m.updated DESC"
+                    (SELECT COUNT(*) FROM memory_deliveries d WHERE d.memory_id = m.id) AS uses,
+                    (SELECT MAX(delivered_at) FROM memory_deliveries d WHERE d.memory_id = m.id) AS last_used
+             FROM memories m WHERE {} ORDER BY {}, m.id DESC",
+            conditions.join(" AND "),
+            order.join(", ")
         ))?;
         let rows = statement.query_map([], |row| {
             Ok(OverviewRow {
@@ -960,6 +1028,55 @@ mod tests {
             .connection
             .execute_batch("CREATE VIRTUAL TABLE probe USING fts5(content)")
             .unwrap();
+    }
+
+    #[test]
+    fn overview_filters_by_kind_and_sorts_by_typed_keys() {
+        let memory = Memory::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for (kind, title) in [
+            (Kind::Observation, "quiet"),
+            (Kind::Card, "popular"),
+            (Kind::Observation, "used once"),
+        ] {
+            let id = memory
+                .add(&NewMemory {
+                    kind,
+                    entity: None,
+                    title: title.into(),
+                    body: "Body.".into(),
+                    links: vec![],
+                    source_session: None,
+                    class: None,
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        memory.record_delivery(ids[1], "s1", "UserPromptSubmit", "full").unwrap();
+        memory.record_delivery(ids[1], "s2", "UserPromptSubmit", "full").unwrap();
+        memory.record_delivery(ids[2], "s1", "UserPromptSubmit", "full").unwrap();
+
+        let by_uses = memory
+            .overview(&Listing {
+                filter: ListFilter::Active,
+                kinds: vec![],
+                order: vec![SortKey { column: SortColumn::Uses, descending: true }],
+            })
+            .unwrap();
+        let titles: Vec<&str> = by_uses.iter().map(|it| it.stored.title.as_str()).collect();
+        assert_eq!(titles, vec!["popular", "used once", "quiet"]);
+        assert_eq!(by_uses[0].uses, 2);
+        assert!(by_uses[2].last_used.is_none());
+
+        let observations = memory
+            .overview(&Listing {
+                filter: ListFilter::Active,
+                kinds: vec![Kind::Observation],
+                order: vec![SortKey { column: SortColumn::Title, descending: false }],
+            })
+            .unwrap();
+        let titles: Vec<&str> = observations.iter().map(|it| it.stored.title.as_str()).collect();
+        assert_eq!(titles, vec!["quiet", "used once"]);
     }
 
     #[test]

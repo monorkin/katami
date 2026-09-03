@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use crate::cards;
 use crate::embeddings;
 use crate::fsutil;
-use crate::memory::{Kind, ListFilter, Memory, NewMemory};
+use crate::memory::{Kind, ListFilter, Listing, Memory, NewMemory, SortColumn, SortKey};
 use crate::paths;
 use crate::search;
 
@@ -93,9 +93,14 @@ pub fn show(id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn list(filter: ListFilter) -> Result<()> {
+pub fn list(filter: ListFilter, kinds: Option<&str>, sort_by: Option<&str>) -> Result<()> {
+    let listing = Listing {
+        filter,
+        kinds: parse_kinds(kinds.unwrap_or(""))?,
+        order: parse_sort(sort_by.unwrap_or(""))?,
+    };
     let memory = open()?;
-    let rows = memory.overview(filter)?;
+    let rows = memory.overview(&listing)?;
     if rows.is_empty() {
         println!("No memories here — sessions will add them, or use `katami memory add`.");
         return Ok(());
@@ -126,6 +131,54 @@ pub fn list(filter: ListFilter) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn parse_kinds(text: &str) -> Result<Vec<Kind>> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|it| !it.is_empty())
+        .map(|name| {
+            Kind::parse(name)
+                .with_context(|| format!("unknown kind '{name}' — expected observation, card, or status"))
+        })
+        .collect()
+}
+
+/// Accepts the SQL-looking form people reach for — `last_used desc, uses` —
+/// but only ever yields typed keys; nothing here reaches the query as text.
+fn parse_sort(text: &str) -> Result<Vec<SortKey>> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|it| !it.is_empty())
+        .map(parse_sort_key)
+        .collect()
+}
+
+fn parse_sort_key(term: &str) -> Result<SortKey> {
+    let mut words = term.split_whitespace();
+    let column = words.next().expect("terms are non-empty");
+    let direction = words.next().map(str::to_ascii_lowercase);
+    if words.next().is_some() {
+        anyhow::bail!("could not read sort term '{term}' — expected a column, optionally followed by asc or desc");
+    }
+
+    let column = match column.to_ascii_lowercase().as_str() {
+        "id" => SortColumn::Id,
+        "updated" => SortColumn::Updated,
+        "kind" => SortColumn::Kind,
+        "uses" => SortColumn::Uses,
+        "last_used" | "last-used" => SortColumn::LastUsed,
+        "title" => SortColumn::Title,
+        other => anyhow::bail!(
+            "unknown sort column '{other}' — expected id, updated, kind, uses, last_used, or title"
+        ),
+    };
+    let descending = match direction.as_deref() {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => anyhow::bail!("unknown sort direction '{other}' — expected asc or desc"),
+    };
+    Ok(SortKey { column, descending })
 }
 
 pub fn archive(id: i64) -> Result<()> {
@@ -241,5 +294,28 @@ mod tests {
 
         assert!(parse_edit_buffer("no heading\n\nBody.\n").is_err());
         assert!(parse_edit_buffer("# T\nentity: x\n\n\n").is_err());
+    }
+
+    #[test]
+    fn kinds_are_parsed_from_a_comma_list() {
+        assert_eq!(parse_kinds("card, status").unwrap(), vec![Kind::Card, Kind::Status]);
+        assert!(parse_kinds("").unwrap().is_empty());
+        assert!(parse_kinds("skill").is_err());
+    }
+
+    #[test]
+    fn sort_terms_become_typed_keys() {
+        assert_eq!(
+            parse_sort("last_used DESC, uses desc, title").unwrap(),
+            vec![
+                SortKey { column: SortColumn::LastUsed, descending: true },
+                SortKey { column: SortColumn::Uses, descending: true },
+                SortKey { column: SortColumn::Title, descending: false },
+            ]
+        );
+        assert!(parse_sort("").unwrap().is_empty());
+        assert!(parse_sort("uses; DROP TABLE memories").is_err());
+        assert!(parse_sort("uses sideways").is_err());
+        assert!(parse_sort("body desc").is_err());
     }
 }
