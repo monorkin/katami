@@ -202,11 +202,14 @@ fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
         ));
     }
 
-    let consolidation: Consolidation = distiller::ask(CONSOLIDATE_PROMPT, &input, config_dir)?;
     let valid_ids: Vec<i64> = observations.iter().map(|it| it.id).collect();
-    if consolidation.folded_ids.iter().any(|it| !valid_ids.contains(it)) {
-        bail!("the consolidation named observation ids that don't belong to {entity}");
-    }
+    let consolidation: Consolidation =
+        distiller::ask(CONSOLIDATE_PROMPT, &input, config_dir, |consolidation: &Consolidation| {
+            if let Some(id) = consolidation.folded_ids.iter().find(|it| !valid_ids.contains(it)) {
+                bail!("the consolidation folded id {id}, which does not belong to {entity}");
+            }
+            Ok(())
+        })?;
 
     memory.with_transaction(|memory| {
         apply(memory, entity, card.as_ref().map(|it| it.id), &consolidation)

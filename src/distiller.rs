@@ -22,19 +22,32 @@ use crate::hook_protocol;
 
 const CORRECTIONS: usize = 2;
 
-pub fn ask<T: DeserializeOwned>(prompt: &str, input: &str, config_dir: &Path) -> Result<T> {
+/// `check` is the caller's semantic validation — evidence that exists, ids it
+/// was shown, classes it knows. A failure there is fed back to the model just
+/// like a parse failure, since both mean the same thing: try again.
+pub fn ask<T: DeserializeOwned>(
+    prompt: &str,
+    input: &str,
+    config_dir: &Path,
+    check: impl Fn(&T) -> Result<()>,
+) -> Result<T> {
     let reply = run(prompt, input, None, config_dir)?;
-    let mut outcome = parse(&reply.result);
+    let mut outcome = parse(&reply.result).and_then(|it| accept(it, &check));
 
     for _ in 0..CORRECTIONS {
         let Err(error) = &outcome else { break };
         let correction = format!(
-            "That reply was not the expected JSON ({error:#}). Reply again with ONLY the JSON object described in the instructions — no prose, no code fences."
+            "That reply could not be used: {error:#}. Reply again with ONLY the JSON object described in the instructions — no prose, no code fences — with that problem fixed. Drop an item rather than invent evidence or ids for it."
         );
         let retried = run(&correction, "", Some(&reply.session_id), config_dir)?;
-        outcome = parse(&retried.result);
+        outcome = parse(&retried.result).and_then(|it| accept(it, &check));
     }
     outcome
+}
+
+fn accept<T>(value: T, check: &impl Fn(&T) -> Result<()>) -> Result<T> {
+    check(&value)?;
+    Ok(value)
 }
 
 struct Reply {

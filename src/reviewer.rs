@@ -34,7 +34,7 @@ use crate::transcript_pi;
 
 const DEBOUNCE_USER_TURNS: usize = 5;
 const CONTEXT_TURNS: usize = 2;
-const ATTEMPT_CAP: i64 = 3;
+const ATTEMPT_CAP: i64 = 5;
 const LEASE_MINUTES: u64 = 10;
 const KNOWN_MEMORIES: usize = 12;
 const KNOWN_BUDGET_CHARS: usize = 4000;
@@ -282,9 +282,11 @@ fn review_chunk(memory: &Memory, chunk: &ReviewChunk, config_dir: &Path) -> Resu
 
     let (known, shown_ids) = known_context(memory, entity, &turns)?;
     let input = format!("{known}\nTranscript:\n{}", render_turns(&turns));
-    let review: Review = distiller::ask(&review_prompt(entity), &input, config_dir)?;
+    let review: Review = distiller::ask(&review_prompt(entity), &input, config_dir, |review| {
+        validate(memory, review, &turns, &shown_ids)
+    })?;
 
-    memory.with_transaction(|memory| apply(memory, &review, chunk, &turns, &shown_ids))?;
+    memory.with_transaction(|memory| apply(memory, &review, chunk, &turns))?;
     report(&review);
     Ok(())
 }
@@ -368,19 +370,49 @@ fn render_turns(turns: &[LabeledTurn]) -> String {
         .join("\n\n")
 }
 
-fn apply(
-    memory: &Memory,
-    review: &Review,
-    chunk: &ReviewChunk,
-    turns: &[LabeledTurn],
-    shown_ids: &[i64],
-) -> Result<()> {
+/// Everything that can be wrong with a review, checked before anything is
+/// written so a bad reply costs a correction round, not a rolled-back
+/// transaction.
+fn validate(memory: &Memory, review: &Review, turns: &[LabeledTurn], shown_ids: &[i64]) -> Result<()> {
     for observation in &review.observations {
-        apply_observation(memory, observation, chunk, turns, shown_ids)?;
+        if !CLASSES.contains(&observation.class.as_str()) {
+            anyhow::bail!(
+                "the review classified '{}' as '{}' — not one of the known classes",
+                observation.title,
+                observation.class
+            );
+        }
+        cited_turns(observation, turns)?;
+        for superseded in &observation.supersedes {
+            assert_changeable(memory, *superseded, shown_ids)?;
+        }
+    }
+    for retraction in &review.retracts {
+        assert_changeable(memory, retraction.id, shown_ids)?;
+    }
+    for proposal in &review.skill_proposals {
+        if !valid_skill_name(&proposal.name) {
+            anyhow::bail!(
+                "the review proposed a skill named '{}' — names must be lowercase letters, digits, and dashes",
+                proposal.name
+            );
+        }
+    }
+    if let Some(status) = &review.status
+        && let Some(op) = status.op.as_deref()
+        && !matches!(op, "replace" | "clear")
+    {
+        anyhow::bail!("unknown status op '{op}' — expected replace or clear");
+    }
+    Ok(())
+}
+
+fn apply(memory: &Memory, review: &Review, chunk: &ReviewChunk, turns: &[LabeledTurn]) -> Result<()> {
+    for observation in &review.observations {
+        apply_observation(memory, observation, chunk, turns)?;
     }
 
     for retraction in &review.retracts {
-        assert_changeable(memory, retraction.id, shown_ids)?;
         memory.archive(retraction.id, "retracted")?;
         log(&format!(
             "retracted memory {} — {}",
@@ -390,12 +422,6 @@ fn apply(
     }
 
     for proposal in &review.skill_proposals {
-        if !valid_skill_name(&proposal.name) {
-            anyhow::bail!(
-                "the review proposed a skill named '{}' — names must be lowercase letters, digits, and dashes",
-                proposal.name
-            );
-        }
         memory.add_generated_skill(&proposal.name, &proposal.description, &proposal.instructions)?;
     }
 
@@ -410,15 +436,7 @@ fn apply_observation(
     observation: &Observation,
     chunk: &ReviewChunk,
     turns: &[LabeledTurn],
-    shown_ids: &[i64],
 ) -> Result<()> {
-    if !CLASSES.contains(&observation.class.as_str()) {
-        anyhow::bail!(
-            "the review classified '{}' as '{}' — not one of the known classes",
-            observation.title,
-            observation.class
-        );
-    }
     let evidence = cited_turns(observation, turns)?;
 
     let mut links = cards::extract_links(&observation.body);
@@ -444,7 +462,6 @@ fn apply_observation(
         memory.add_evidence(id, chunk.source_session.as_deref(), &turn.label, &turn.role, &excerpt)?;
     }
     for superseded in &observation.supersedes {
-        assert_changeable(memory, *superseded, shown_ids)?;
         memory.archive(*superseded, "superseded")?;
     }
     Ok(())
@@ -624,6 +641,37 @@ mod tests {
         assert!(review.retracts.is_empty());
 
         assert!(serde_json::from_str::<Review>(r#"{"observations":[{"title":"t","body":"b"}]}"#).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_bad_reviews_before_anything_is_written() {
+        let memory = Memory::open_in_memory().unwrap();
+        let turns = turns();
+
+        let good: Review = serde_json::from_str(
+            r#"{"observations":[{"title":"Prefers rebase","body":"b","class":"preference","evidence_turns":["N1"]}]}"#,
+        )
+        .unwrap();
+        assert!(validate(&memory, &good, &turns, &[]).is_ok());
+
+        let unknown_class: Review = serde_json::from_str(
+            r#"{"observations":[{"title":"t","body":"b","class":"project","evidence_turns":["N1"]}]}"#,
+        )
+        .unwrap();
+        assert!(validate(&memory, &unknown_class, &turns, &[]).is_err());
+
+        let no_user_evidence: Review = serde_json::from_str(
+            r#"{"observations":[{"title":"t","body":"b","class":"preference","evidence_turns":["N2"]}]}"#,
+        )
+        .unwrap();
+        assert!(validate(&memory, &no_user_evidence, &turns, &[]).is_err());
+
+        let unshown_retract: Review = serde_json::from_str(r#"{"retracts":[{"id":99}]}"#).unwrap();
+        assert!(validate(&memory, &unshown_retract, &turns, &[]).is_err());
+
+        let bogus_status: Review = serde_json::from_str(r#"{"status":{"op":"nuke"}}"#).unwrap();
+        assert!(validate(&memory, &bogus_status, &turns, &[]).is_err());
+        assert_eq!(memory.list().unwrap().len(), 0);
     }
 
     #[test]
