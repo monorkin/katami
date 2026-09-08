@@ -11,6 +11,13 @@
 //! whole retry with backoff on that, the same session is resumed with the
 //! parse error and asked for the JSON again, up to three tries in all — it
 //! already has the input, so a correction is cheap and usually lands.
+//!
+//! The model reads transcripts, and transcripts contain drafts, tokens, and
+//! half-finished plans. It once picked one up and carried it out — with the
+//! project's Bash allow rules and credentials — so it now runs with nothing
+//! but a Read tool, no MCP servers, no skills, no settings files, and from
+//! katami's own data dir rather than the project, where a CLAUDE.md or a
+//! permissive allow list would otherwise be waiting.
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
@@ -19,6 +26,15 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::hook_protocol;
+use crate::paths;
+
+const READ_ONLY: [&str; 5] = [
+    "--restricted",
+    "--tools",
+    "Read",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+];
 
 const CORRECTIONS: usize = 2;
 
@@ -59,6 +75,8 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Re
     let mut command = Command::new("claude");
     command
         .args(["-p", prompt, "--model", "haiku", "--output-format", "json"])
+        .args(READ_ONLY)
+        .current_dir(paths::data_dir())
         .env("CLAUDE_CONFIG_DIR", config_dir)
         .env_remove(hook_protocol::SOCKET_ENV_VAR)
         .stdin(Stdio::piped())
