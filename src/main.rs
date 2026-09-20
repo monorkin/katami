@@ -105,10 +105,9 @@ enum Command {
         /// Take a machine out of the mesh, everywhere
         #[usage(long)]
         remove: Option<String>,
-        /// Listen for other machines without a session running
-        #[usage(long)]
-        serve: bool,
     },
+    /// Listen for linked machines without a session running
+    Serve,
     /// Show what the supervisor, reviewer, and curator have been doing
     Log {
         /// Number of recent lines to show
@@ -237,7 +236,7 @@ enum ShellCompletionCommand {
 
 /// The reserved words that name a katami subcommand rather than a coding tool
 /// to supervise. Anything else in the first position is a launcher.
-const SUBCOMMANDS: [&str; 11] = [
+const SUBCOMMANDS: [&str; 12] = [
     "hook",
     "review",
     "relays",
@@ -245,6 +244,7 @@ const SUBCOMMANDS: [&str; 11] = [
     "link",
     "log",
     "memory",
+    "serve",
     "setup",
     "upgrade",
     "shell-completion",
@@ -285,14 +285,14 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Curate { config_dir } => curator::run(&config_dir, curator::Reason::Scheduled),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
-        Command::Link { host, accept, remove, serve } => match (host, accept, remove, serve) {
-            (Some(host), None, None, false) => link_cli::link(&host),
-            (None, Some(code), None, false) => link_cli::accept(&code),
-            (None, None, Some(name), false) => link_cli::remove(&name),
-            (None, None, None, true) => link_cli::serve(),
-            (None, None, None, false) => link_cli::status(),
-            _ => anyhow::bail!("`katami link` does one thing at a time — a host, --accept, --remove, or --serve"),
+        Command::Link { host, accept, remove } => match (host, accept, remove) {
+            (Some(host), None, None) => link_cli::link(&host),
+            (None, Some(code), None) => link_cli::accept(&code),
+            (None, None, Some(name)) => link_cli::remove(&name),
+            (None, None, None) => link_cli::status(),
+            _ => anyhow::bail!("`katami link` does one thing at a time — a host, --accept, or --remove"),
         },
+        Command::Serve => link_cli::serve(),
         Command::Setup => setup::run(),
         Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::Memory { command } => match command {

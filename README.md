@@ -71,7 +71,7 @@ katami link mini                          # share memory with another of your ma
 katami link                               # who's linked, who's asking to pair, what's waiting to merge
 katami link --accept K7M2-P9XQ            # let in a machine that isn't yours by Tailscale's word
 katami link --remove mini                 # take a machine out of the mesh, everywhere
-katami link --serve                       # listen for other machines without a session running
+katami serve                              # listen for linked machines without a session running
 katami memory sync                        # sync with every reachable machine and merge conflicts, now
 
 katami log -f                             # watch what the supervisor is doing

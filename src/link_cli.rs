@@ -39,7 +39,7 @@ pub fn link(host: &str) -> Result<()> {
 pub fn accept(code: &str) -> Result<()> {
     let pairing = open()?.accept_pairing(code)?;
     println!(
-        "Accepted {} ({}). It finishes pairing by itself within a few seconds, as long as katami is listening here — a session, or `katami link --serve`.",
+        "Accepted {} ({}). It finishes pairing by itself within a few seconds, as long as katami is listening here — a session, or `katami serve`.",
         pairing.name, pairing.address
     );
     Ok(())

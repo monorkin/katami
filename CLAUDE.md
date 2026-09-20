@@ -83,7 +83,7 @@ Relays and codex hooks also write into real config — sandbox those too with
     queue, and generated skills are per machine.
   - To try it in a sandbox, give each `XDG_DATA_HOME` its own
     `katami/config.json` with a distinct `mesh_port` and run
-    `katami link --serve` in each; they bind this machine's Tailscale IP and
+    `katami serve` in each; they bind this machine's Tailscale IP and
     trust each other on sight. `KATAMI_MESH_LISTEN=127.0.0.1:<port>` binds
     loopback instead, which Tailscale doesn't vouch for, so it exercises
     pairing.
@@ -126,7 +126,7 @@ rustc.
 
 `katami <tool> …` supervises whatever follows — the first word picks the
 adapter (`katami claude`, `katami codex`, `katami ax --account x -- …`). Bare
-`katami` prints help. Reserved subcommands (`memory`, `link`, `log`, `relays`,
+`katami` prints help. Reserved subcommands (`memory`, `link`, `serve`, `log`, `relays`,
 `setup`, `upgrade`, `hook`, `review`, `curate`, `shell-completion`) are listed
 in `SUBCOMMANDS` in `main.rs`; anything else in the first position is a
 launcher.

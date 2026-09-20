@@ -173,7 +173,7 @@ fn sync_with_peer(memory: &Memory, peer: &Peer) -> Result<Reply> {
 pub fn sync_with(memory: &Memory, address: &str, token: Option<&str>, pairing_code: Option<&str>) -> Result<Reply> {
     let address = resolve(address)?;
     let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).with_context(|| {
-        format!("could not reach {address} — katami listens there while a session is running on that machine, or under `katami link --serve`")
+        format!("could not reach {address} — katami listens there while a session is running on that machine, or under `katami serve`")
     })?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
