@@ -8,7 +8,10 @@
 //! after it — normalized, because `git@github.com:acme/app.git` and
 //! `https://github.com/acme/app` are one place written two ways. A fork has
 //! its own origin and so its own memories, which is right more often than
-//! not. Anything without an origin keeps its path.
+//! not. Anything without an origin keeps its path, written from `~` when it's
+//! under the home directory: two machines with the same layout then agree on
+//! it despite different usernames, and two with different layouts are no
+//! worse off.
 //!
 //! Every path a project is reached through — the working directory, its
 //! symlink-resolved form, the main checkout behind a worktree — is an alias
@@ -43,9 +46,10 @@ pub fn at(cwd: &Path) -> Project {
 
     let mut aliases = Vec::new();
     for path in [cwd, &resolved, &home] {
-        let alias = path_entity(path);
-        if alias != entity && !aliases.contains(&alias) {
-            aliases.push(alias);
+        for alias in [path_entity(path), absolute_entity(path)] {
+            if alias != entity && !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
         }
     }
 
@@ -57,6 +61,35 @@ pub fn at(cwd: &Path) -> Project {
 }
 
 pub fn path_entity(path: &Path) -> String {
+    name_path(path, dirs::home_dir().as_deref())
+}
+
+/// A path under the home directory is written from `~`, because the user's
+/// name is the part of a path most likely to differ between their machines.
+pub fn name_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|it| path.strip_prefix(it).ok()) {
+        Some(below_home) if below_home.as_os_str().is_empty() => "project:~".to_string(),
+        Some(below_home) => format!("project:~/{}", below_home.display()),
+        None => absolute_entity(path),
+    }
+}
+
+/// Where a path-named project lives on this machine; `None` for a project
+/// named after its remote, which could be checked out anywhere or nowhere.
+pub fn local_path(entity: &str) -> Option<PathBuf> {
+    let name = entity.strip_prefix("project:")?;
+    if name == "~" {
+        dirs::home_dir()
+    } else if let Some(below_home) = name.strip_prefix("~/") {
+        dirs::home_dir().map(|it| it.join(below_home))
+    } else if name.starts_with('/') {
+        Some(PathBuf::from(name))
+    } else {
+        None
+    }
+}
+
+fn absolute_entity(path: &Path) -> String {
     format!("project:{}", path.display())
 }
 
@@ -169,6 +202,22 @@ mod tests {
             normalize_remote("git@gitlab.example.com:group/sub/app.git").as_deref(),
             Some("gitlab.example.com/group/sub/app")
         );
+    }
+
+    #[test]
+    fn paths_under_home_are_named_from_the_tilde() {
+        let home = Path::new("/home/someone");
+        assert_eq!(name_path(Path::new("/home/someone/Work/app"), Some(home)), "project:~/Work/app");
+        assert_eq!(name_path(home, Some(home)), "project:~");
+        assert_eq!(name_path(Path::new("/srv/app"), Some(home)), "project:/srv/app");
+        assert_eq!(name_path(Path::new("/home/someone-else/app"), Some(home)), "project:/home/someone-else/app");
+        assert_eq!(name_path(Path::new("/home/someone/app"), None), "project:/home/someone/app");
+
+        assert_eq!(local_path("project:/srv/app"), Some(PathBuf::from("/srv/app")));
+        assert_eq!(local_path("project:~/Work/app"), dirs::home_dir().map(|it| it.join("Work/app")));
+        assert_eq!(local_path("project:~"), dirs::home_dir());
+        assert_eq!(local_path("project:example.com/acme/app"), None);
+        assert_eq!(local_path("person:Jason"), None);
     }
 
     #[test]

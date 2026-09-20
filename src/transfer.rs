@@ -23,6 +23,7 @@ use crate::distiller;
 use crate::embeddings;
 use crate::memory::{Kind, Memory, Portable};
 use crate::paths;
+use crate::project;
 
 #[derive(Debug, PartialEq)]
 pub enum Selection {
@@ -274,9 +275,8 @@ fn report(memory: &Memory, outcome: &Outcome) -> Result<()> {
     let mut homeless: Vec<String> = Vec::new();
     for id in &outcome.added {
         if let Some(entity) = memory.get(*id)?.entity
-            && let Some(directory) = entity.strip_prefix("project:")
-            && directory.starts_with('/')
-            && !Path::new(directory).is_dir()
+            && let Some(directory) = project::local_path(&entity)
+            && !directory.is_dir()
             && !homeless.contains(&entity)
         {
             homeless.push(entity);

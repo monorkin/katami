@@ -115,11 +115,10 @@ fn archive_never_retrieved(memory: &Memory) -> Result<()> {
 /// checkout here gets its proper name now.
 fn rehome_aliased_memories(memory: &Memory) -> Result<()> {
     for entity in memory.entities()? {
-        if let Some(path) = entity.strip_prefix("project:")
-            && path.starts_with('/')
-            && Path::new(path).is_dir()
+        if let Some(path) = project::local_path(&entity)
+            && path.is_dir()
         {
-            memory.settle_project(&project::at(Path::new(path)))?;
+            memory.settle_project(&project::at(&path))?;
         }
     }
 
