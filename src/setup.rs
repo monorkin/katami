@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::completions;
 use crate::embeddings;
+use crate::reranker;
 
 pub fn run() -> Result<()> {
     match current_shell() {
@@ -23,6 +24,12 @@ pub fn run() -> Result<()> {
         println!("Semantic search model already installed.");
     } else {
         embeddings::pull()?;
+    }
+
+    if reranker::available() {
+        println!("Relevance model already installed.");
+    } else {
+        reranker::pull()?;
     }
     Ok(())
 }

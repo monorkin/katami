@@ -7,7 +7,8 @@ endif
 
 # Static musl builds so one binary runs across distros, and mise can hand it
 # out without worrying about the host's glibc. cross carries the musl toolchain
-# for the C dependencies (bundled SQLite, ring).
+# for the C dependencies (bundled SQLite, ring, and the onig regex engine that
+# candle's tokenizers build pulls in).
 TARGETS = \
 	x86_64-unknown-linux-musl \
 	aarch64-unknown-linux-musl

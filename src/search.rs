@@ -12,9 +12,28 @@ use crate::memory::{Memory, Stored};
 
 const CONTEXT_BUDGET_CHARS: usize = 4000;
 
+const CANDIDATES: usize = 15;
+
+/// The reranker's raw logit a memory has to reach to count as relevant. Its
+/// sigmoid is useless as a probability — real matches often sit near 0.03 —
+/// but on this kind of store matches land above -4 and noise below -5.
+const RELEVANCE_FLOOR: f32 = -4.0;
+
 pub struct Hit {
     pub id: i64,
     pub score: f64,
+}
+
+/// One candidate as the reranker saw it, relevant or not — the rejected ones
+/// are the negatives a fine-tuned judge will need.
+pub struct Judgment {
+    pub memory_id: i64,
+    pub logit: f32,
+}
+
+pub struct Selection {
+    pub hits: Vec<Hit>,
+    pub judgments: Vec<Judgment>,
 }
 
 pub fn bm25(memory: &Memory, query: &str, limit: usize) -> Result<Vec<Hit>> {
@@ -51,6 +70,42 @@ pub fn hybrid(memory: &Memory, query: &str, limit: usize) -> Result<Vec<Hit>> {
 
     let semantic = vector(memory, &query_vector, limit * 2)?;
     Ok(fuse(&[lexical, semantic], limit))
+}
+
+/// Hybrid search proposes candidates and the reranker decides which of them
+/// are about the prompt at all, so a prompt that matches nothing selects
+/// nothing. Until the reranker is pulled this is plain hybrid search.
+pub fn relevant(memory: &Memory, query: &str, limit: usize) -> Result<Selection> {
+    let candidates = hybrid(memory, query, CANDIDATES)?;
+    let passages = candidates
+        .iter()
+        .map(|it| memory.get(it.id).map(|stored| format!("{}. {}", stored.title, stored.body)))
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(logits) = crate::reranker::judge(query, &passages)? {
+        let judgments: Vec<Judgment> = candidates
+            .iter()
+            .zip(logits)
+            .map(|(candidate, logit)| Judgment { memory_id: candidate.id, logit })
+            .collect();
+        Ok(Selection { hits: relevant_among(&judgments, limit), judgments })
+    } else {
+        Ok(Selection {
+            hits: candidates.into_iter().take(limit).collect(),
+            judgments: Vec::new(),
+        })
+    }
+}
+
+pub fn relevant_among(judgments: &[Judgment], limit: usize) -> Vec<Hit> {
+    let mut hits: Vec<Hit> = judgments
+        .iter()
+        .filter(|it| it.logit >= RELEVANCE_FLOOR)
+        .map(|it| Hit { id: it.memory_id, score: it.logit as f64 })
+        .collect();
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits.truncate(limit);
+    hits
 }
 
 pub fn vector(memory: &Memory, query: &[f32], limit: usize) -> Result<Vec<Hit>> {
@@ -254,6 +309,25 @@ mod tests {
         let fused = fuse(&[lexical, semantic], 3);
         assert_eq!(fused[0].id, 2);
         assert_eq!(fused.len(), 3);
+    }
+
+    #[test]
+    fn only_judgments_above_the_floor_are_relevant() {
+        let judgments = [
+            Judgment { memory_id: 1, logit: -8.0 },
+            Judgment { memory_id: 2, logit: -3.3 },
+            Judgment { memory_id: 3, logit: 7.1 },
+            Judgment { memory_id: 4, logit: 0.5 },
+        ];
+
+        let ids: Vec<i64> = relevant_among(&judgments, 5).iter().map(|it| it.id).collect();
+        assert_eq!(ids, vec![3, 4, 2]);
+
+        let capped: Vec<i64> = relevant_among(&judgments, 2).iter().map(|it| it.id).collect();
+        assert_eq!(capped, vec![3, 4]);
+
+        let noise = [Judgment { memory_id: 1, logit: -8.0 }, Judgment { memory_id: 2, logit: -10.2 }];
+        assert!(relevant_among(&noise, 5).is_empty());
     }
 
     #[test]

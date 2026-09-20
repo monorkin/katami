@@ -14,10 +14,12 @@ mod log_cli;
 mod logs;
 mod memory;
 mod memory_cli;
+mod models;
 mod overlay;
 mod paths;
 mod pty;
 mod relays;
+mod reranker;
 mod reviewer;
 mod search;
 mod setup;
@@ -135,6 +137,8 @@ enum MemoryCommand {
     },
     /// Search memories
     Search { query: String },
+    /// Show what a prompt would get injected, and what was judged irrelevant
+    Judge { prompt: String },
     /// Show one memory with its links
     Show { id: i64 },
     /// Open a memory in $EDITOR
@@ -158,7 +162,7 @@ enum MemoryCommand {
         #[usage(long)]
         sort_by: Option<String>,
     },
-    /// Download the embedding model that powers semantic search
+    /// Download the models that power semantic search and relevance judging
     PullModels,
     /// Consolidate observations into cards and archive unused skills now
     Curate,
@@ -246,6 +250,7 @@ fn run(cli: Cli) -> Result<()> {
                 card,
             } => memory_cli::add(&title, &body, entity, link, card),
             MemoryCommand::Search { query } => memory_cli::search(&query),
+            MemoryCommand::Judge { prompt } => memory_cli::judge(&prompt),
             MemoryCommand::Show { id } => memory_cli::show(id),
             MemoryCommand::Edit { id } => memory_cli::edit(id),
             MemoryCommand::Archive { id } => memory_cli::archive(id),
@@ -265,7 +270,7 @@ fn run(cli: Cli) -> Result<()> {
                 };
                 memory_cli::list(filter, kinds.as_deref(), sort_by.as_deref())
             }
-            MemoryCommand::PullModels => embeddings::pull(),
+            MemoryCommand::PullModels => embeddings::pull().and_then(|_| reranker::pull()),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),
         },
         Command::ShellCompletion { command } => match command {

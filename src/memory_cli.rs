@@ -8,6 +8,7 @@ use crate::embeddings;
 use crate::fsutil;
 use crate::memory::{Kind, ListFilter, Listing, Memory, NewMemory, SortColumn, SortKey};
 use crate::paths;
+use crate::reranker;
 use crate::search;
 
 pub fn add(
@@ -65,6 +66,34 @@ pub fn search(query: &str) -> Result<()> {
             &stored.updated[..10],
             stored.kind,
             stored.title
+        );
+    }
+    Ok(())
+}
+
+pub fn judge(prompt: &str) -> Result<()> {
+    let memory = open()?;
+    if !reranker::available() {
+        anyhow::bail!("no relevance model installed — run `katami memory pull-models`");
+    }
+
+    let selection = search::relevant(&memory, prompt, 5)?;
+    let mut judgments = selection.judgments;
+    judgments.sort_by(|a, b| b.logit.total_cmp(&a.logit));
+
+    println!("{:>4}  {:>6}  {:<8}  title", "id", "logit", "verdict");
+    for judgment in judgments {
+        let verdict = if selection.hits.iter().any(|it| it.id == judgment.memory_id) {
+            "injected"
+        } else {
+            "skipped"
+        };
+        println!(
+            "{:>4}  {:>6.1}  {:<8}  {}",
+            judgment.memory_id,
+            judgment.logit,
+            verdict,
+            memory.get(judgment.memory_id)?.title
         );
     }
     Ok(())

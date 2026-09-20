@@ -35,6 +35,13 @@ Relays and codex hooks also write into real config — sandbox those too with
 - **`memory.rs`** is one SQLite store: observations, cards, status, links,
   deliveries, evidence, the review queue. Schema changes bump `user_version`
   and add a migration step — see `migrate()`.
+- **`search.rs`** picks what a prompt gets: hybrid BM25 + Model2Vec search
+  proposes candidates, then **`reranker.rs`** (a MiniLM cross-encoder on
+  candle) judges each one and only those above `RELEVANCE_FLOOR` are injected.
+  Every judgment lands in `relevance_judgments` as future training data.
+  Models are checksum-pinned downloads (`models.rs`); without them search
+  degrades to BM25 and the top hits go out unjudged. To try it in a sandbox,
+  symlink each model dir into `$XDG_DATA_HOME/katami/models/`.
 - **`reviewer.rs`** runs after a session stops: transcript delta → durable
   `review_chunks` queue → `distiller.rs` (haiku via `claude -p`) → validated
   JSON applied in one transaction. **The reviewer and curator always use

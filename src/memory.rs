@@ -167,6 +167,23 @@ const MIGRATE_3_TO_4: &str = "
     PRAGMA user_version = 4;
 ";
 
+/// v5 keeps every relevance judgment the reranker makes, rejected candidates
+/// included — prompt, memory, and logit are the raw material for fine-tuning
+/// a judge on this store's own traffic.
+const MIGRATE_4_TO_5: &str = "
+    CREATE TABLE relevance_judgments (
+        id INTEGER PRIMARY KEY,
+        memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        model TEXT NOT NULL,
+        logit REAL NOT NULL,
+        judged_at TEXT NOT NULL
+    );
+
+    PRAGMA user_version = 5;
+";
+
 pub struct NewReviewChunk {
     pub transcript_path: String,
     pub source_session: Option<String>,
@@ -295,6 +312,9 @@ impl Memory {
             }
             if memory.schema_version()? == 3 {
                 memory.connection.execute_batch(MIGRATE_3_TO_4)?;
+            }
+            if memory.schema_version()? == 4 {
+                memory.connection.execute_batch(MIGRATE_4_TO_5)?;
             }
             Ok(())
         })
@@ -440,7 +460,17 @@ impl Memory {
                 last_seen TEXT NOT NULL
             );
 
-            PRAGMA user_version = 4;
+            CREATE TABLE relevance_judgments (
+                id INTEGER PRIMARY KEY,
+                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                model TEXT NOT NULL,
+                logit REAL NOT NULL,
+                judged_at TEXT NOT NULL
+            );
+
+            PRAGMA user_version = 5;
             ",
         )?;
         Ok(())
@@ -647,6 +677,22 @@ impl Memory {
             "INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![memory_id, session_id, event, form, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_judgment(
+        &self,
+        memory_id: i64,
+        session_id: &str,
+        prompt: &str,
+        model: &str,
+        logit: f32,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO relevance_judgments (memory_id, session_id, prompt, model, logit, judged_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![memory_id, session_id, prompt, model, logit as f64, timestamp()],
         )?;
         Ok(())
     }

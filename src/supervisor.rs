@@ -27,6 +27,7 @@ use crate::logs;
 use crate::memory::{Kind, Memory};
 use crate::paths;
 use crate::pty::{self, RawGuard};
+use crate::reranker;
 use crate::reviewer;
 use crate::search;
 use crate::transcript;
@@ -303,13 +304,33 @@ fn on_user_prompt(request: &HookRequest) -> Result<Option<serde_json::Value>> {
     }
 
     let memory = Memory::open(&paths::memory_dir())?;
-    let hits = search::hybrid(&memory, prompt, 5)?;
-    let Some(composed) = search::compose_context(&memory, &hits)? else {
+    let selection = search::relevant(&memory, prompt, 5)?;
+    record_judgments(request, prompt, selection.judgments);
+    let Some(composed) = search::compose_context(&memory, &selection.hits)? else {
         return Ok(None);
     };
 
     record_deliveries(request, "prompt", composed.full_ids.clone(), composed.pointer_ids.clone());
     Ok(Some(context_reply(&composed.text)))
+}
+
+fn record_judgments(request: &HookRequest, prompt: &str, judgments: Vec<search::Judgment>) {
+    let session = request.payload["session_id"].as_str().unwrap_or("?").to_string();
+    let prompt = prompt.to_string();
+    thread::spawn(move || {
+        let Ok(memory) = Memory::open(&paths::memory_dir()) else {
+            return;
+        };
+        for judgment in judgments {
+            let _ = memory.record_judgment(
+                judgment.memory_id,
+                &session,
+                &prompt,
+                reranker::MODEL_NAME,
+                judgment.logit,
+            );
+        }
+    });
 }
 
 /// The delivery manifest is bookkeeping, and bookkeeping happens off the

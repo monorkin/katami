@@ -33,7 +33,7 @@ omarchy-mise-install github:monorkin/katami katami
 Then, once:
 
 ```bash
-katami setup   # shell completion + the semantic-search model (~30MB)
+katami setup   # shell completion + the search and relevance models (~120MB)
 ```
 
 ## Usage
@@ -55,9 +55,10 @@ Run `katami` with no command to see the help. The rest are subcommands:
 ```bash
 katami memory list                        # what it has learned
 katami memory search "deploy process"     # hybrid BM25 + semantic search
+katami memory judge "fix the deploy"      # what that prompt would get injected, and what wouldn't
 katami memory show 12                     # one memory with its [[links]]
 katami memory add "Title" "The fact." --entity project:/path
-katami memory pull-models                 # enable semantic search (~30MB, once)
+katami memory pull-models                 # enable semantic search and relevance judging (~120MB, once)
 katami memory curate                      # consolidate and retire now
 
 katami log -f                             # watch what the supervisor is doing
@@ -101,8 +102,15 @@ Two tool-specific notes:
   in `memory/cards/`), and `[[links]]` between them. On every prompt the
   supervisor runs a hybrid search — FTS5 BM25 fused with static
   [Model2Vec](https://github.com/MinishLab/model2vec) embeddings, all local,
-  microseconds, zero model tokens — and injects the top memories plus
-  one-line pointers to their linked neighbors.
+  microseconds, zero model tokens. Search can only rank, so a small
+  cross-encoder ([ms-marco-MiniLM-L6-v2](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2),
+  run in-process with [candle](https://github.com/huggingface/candle)) then
+  judges each candidate against the prompt, and only the ones it finds
+  relevant are injected, with one-line pointers to their linked neighbors — a
+  prompt that matches nothing gets nothing. `katami memory judge "<prompt>"`
+  shows the verdicts. Every judgment is kept in the store, rejected
+  candidates included, as training data for a judge tuned to your own
+  memories.
 - **The reviewer.** When a session stops, a detached background process feeds
   the transcript delta (your messages and the tool's conclusions, no tool
   noise) to `claude -p --model haiku` and asks what's worth remembering and

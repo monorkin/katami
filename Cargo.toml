@@ -17,3 +17,8 @@ usage = { version = "6", package = "usage-rs", features = ["completions"] }
 # The wasm feature is how you get the pure-Rust build on any target: it picks
 # fancy-regex over onig and skips esaxx's C++, which won't link against musl
 model2vec-rs = { version = "0.2.1", default-features = false, features = ["wasm"] }
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+# candle-core already builds this tokenizers with onig, so the reranker shares it
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
