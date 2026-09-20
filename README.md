@@ -131,18 +131,21 @@ Two tool-specific notes:
 ## Building
 
 ```bash
+mise trust && mise install         # rust, mr-boxington, cross, and gh, from mise.toml
 cargo build --release              # → target/release/katami
 sudo make install                  # → /usr/bin/katami
 ```
 
-A local `make install` just needs the host toolchain.
+A local `make install` just needs the host toolchain. With mise, cargo runs
+through [mr-boxington](https://mr-boxington.jdx.dev), so git worktrees and
+sibling checkouts share compiled crates instead of each growing a full
+`target/`.
 
 Cutting a release (`make release`, or `make build-all` on its own)
 cross-builds static musl binaries for amd64 and arm64, which needs
 [`cross`](https://github.com/cross-rs/cross) and a running Docker or Podman:
 
 ```bash
-cargo install cross
 make release        # builds both targets, publishes the GitHub release
 ```
 
