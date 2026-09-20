@@ -538,6 +538,21 @@ pub struct Portable {
     pub updated: String,
 }
 
+/// One remote-named project that became another: the repository was renamed
+/// or moved hosts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rename {
+    pub from: String,
+    pub to: String,
+    pub seen: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectRoot {
+    pub entity: String,
+    pub root_commit: String,
+}
+
 impl Portable {
     /// Whether two copies are the same memory in every way a person would
     /// notice — which id it has and when it was written aside.
@@ -1131,42 +1146,120 @@ impl Memory {
     /// about to look them up. When a path used to lead to a different name
     /// and the root commit says it's the same repository, the old name
     /// becomes an alias too: that's a rename, not a reused directory.
-    pub fn settle_project(&self, project: &Project) -> Result<()> {
+    ///
+    /// Returns the name to file this project's memories under, which is not
+    /// always the one its checkout gives: if another machine saw the remote
+    /// renamed and this checkout still points at the old one, the mesh has
+    /// already moved on, and the root commit confirms it's the same project.
+    pub fn settle_project(&self, project: &Project) -> Result<String> {
         self.with_transaction(|memory| {
-            for alias in &project.aliases {
+            let entity = memory.name_in_use_for(project)?;
+            for alias in project.aliases.iter().chain([&project.entity]) {
                 if let Some(root_commit) = &project.root_commit
                     && let Some(previous) = memory.canonical_entity_for(alias)?
-                    && previous != project.entity
+                    && previous != entity
                     && memory.root_commit_of(&previous)?.as_ref() == Some(root_commit)
                 {
-                    memory.record_alias(&previous, &project.entity)?;
+                    memory.record_alias(&previous, &entity)?;
                 }
-                memory.record_alias(alias, &project.entity)?;
+                memory.record_alias(alias, &entity)?;
             }
 
             if let Some(root_commit) = &project.root_commit {
                 memory.connection.execute(
                     "INSERT INTO project_roots (entity, root_commit) VALUES (?1, ?2)
                      ON CONFLICT (entity) DO UPDATE SET root_commit = ?2",
-                    rusqlite::params![project.entity, root_commit],
+                    rusqlite::params![entity, root_commit],
                 )?;
             }
             memory.rehome_aliased_entities()?;
-            Ok(())
+            Ok(entity)
         })
+    }
+
+    fn name_in_use_for(&self, project: &Project) -> Result<String> {
+        if let Some(root_commit) = &project.root_commit
+            && let Some(renamed_to) = self.canonical_entity_for(&project.entity)?
+            && self.root_commit_of(&renamed_to)?.as_ref() == Some(root_commit)
+        {
+            Ok(renamed_to)
+        } else {
+            Ok(project.entity.clone())
+        }
+    }
+
+    /// Renames — one remote-named project becoming another — are true on
+    /// every machine and are shared. An alias from a path is not: the same
+    /// `~/Work/app` can hold a different repository on the next machine, and
+    /// sharing it would move memories into the wrong project.
+    pub fn renames(&self) -> Result<Vec<Rename>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT alias, canonical_entity, last_seen FROM entity_aliases ORDER BY alias")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Rename { from: row.get(0)?, to: row.get(1)?, seen: row.get(2)? })
+        })?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|it| crate::project::local_path(&it.from).is_none())
+            .collect())
+    }
+
+    pub fn hear_renames(&self, renames: &[Rename]) -> Result<()> {
+        for rename in renames.iter().filter(|it| crate::project::local_path(&it.from).is_none()) {
+            let known: Option<String> = self
+                .connection
+                .prepare("SELECT last_seen FROM entity_aliases WHERE alias = ?1")?
+                .query_map([&rename.from], |row| row.get(0))?
+                .next()
+                .transpose()?;
+            if known.is_none_or(|it| it < rename.seen) {
+                self.record_alias_seen(&rename.from, &rename.to, &rename.seen)?;
+            }
+        }
+        self.rehome_aliased_entities()?;
+        Ok(())
+    }
+
+    /// A project's root commit never changes, so the first one heard stands.
+    pub fn project_roots(&self) -> Result<Vec<ProjectRoot>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT entity, root_commit FROM project_roots ORDER BY entity")?;
+        let rows = statement.query_map([], |row| Ok(ProjectRoot { entity: row.get(0)?, root_commit: row.get(1)? }))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|it| crate::project::local_path(&it.entity).is_none())
+            .collect())
+    }
+
+    pub fn hear_project_roots(&self, roots: &[ProjectRoot]) -> Result<()> {
+        for root in roots.iter().filter(|it| crate::project::local_path(&it.entity).is_none()) {
+            self.connection.execute(
+                "INSERT OR IGNORE INTO project_roots (entity, root_commit) VALUES (?1, ?2)",
+                rusqlite::params![root.entity, root.root_commit],
+            )?;
+        }
+        Ok(())
     }
 
     /// A canonical name is never itself an alias: whatever pointed at the new
     /// alias now points past it, and the canonical name stops being an alias
     /// for anything, so chains and cycles can't form.
     pub fn record_alias(&self, alias: &str, canonical_entity: &str) -> Result<()> {
+        self.record_alias_seen(alias, canonical_entity, &timestamp())
+    }
+
+    fn record_alias_seen(&self, alias: &str, canonical_entity: &str, seen: &str) -> Result<()> {
         if alias == canonical_entity {
             return Ok(());
         }
         self.connection.execute(
             "INSERT INTO entity_aliases (alias, canonical_entity, last_seen) VALUES (?1, ?2, ?3)
              ON CONFLICT (alias) DO UPDATE SET canonical_entity = ?2, last_seen = ?3",
-            rusqlite::params![alias, canonical_entity, timestamp()],
+            rusqlite::params![alias, canonical_entity, seen],
         )?;
         self.connection.execute(
             "UPDATE entity_aliases SET canonical_entity = ?2 WHERE canonical_entity = ?1",
@@ -2020,6 +2113,37 @@ mod tests {
 
         memory.settle_project(&checkout(old_name, &["/home/someone/app"], "bbb")).unwrap();
         assert_eq!(memory.get(learned).unwrap().entity.as_deref(), Some(new_name));
+    }
+
+    #[test]
+    fn a_rename_seen_on_one_machine_holds_on_one_whose_checkout_has_not_caught_up() {
+        let (old_name, new_name) = ("project:example.com/acme/app", "project:example.com/acme/application");
+        let laptop = Memory::open_in_memory().unwrap();
+        laptop.settle_project(&checkout(old_name, &["/home/someone/app"], "aaa")).unwrap();
+        laptop.settle_project(&checkout(new_name, &["/home/someone/app"], "aaa")).unwrap();
+
+        let renames = laptop.renames().unwrap();
+        assert_eq!(renames.len(), 1, "the path alias stays on the laptop: {renames:?}");
+        assert_eq!((renames[0].from.as_str(), renames[0].to.as_str()), (old_name, new_name));
+
+        let mini = Memory::open_in_memory().unwrap();
+        let learned = observation_about(&mini, old_name, "Learned on the mini under the old name");
+        mini.hear_project_roots(&laptop.project_roots().unwrap()).unwrap();
+        mini.hear_renames(&renames).unwrap();
+        assert_eq!(mini.get(learned).unwrap().entity.as_deref(), Some(new_name));
+
+        let in_use = mini.settle_project(&checkout(old_name, &["/home/agent/code/app"], "aaa")).unwrap();
+        assert_eq!(in_use, new_name);
+        let unrelated = mini.settle_project(&checkout(old_name, &["/tmp/scratch"], "bbb")).unwrap();
+        assert_eq!(unrelated, old_name);
+
+        mini.hear_renames(&[Rename {
+            from: "project:~/Work/app".into(),
+            to: "project:example.com/someone-else/app".into(),
+            seen: "2999-01-01T00:00:00Z".into(),
+        }])
+        .unwrap();
+        assert!(mini.renames().unwrap().iter().all(|it| it.from != "project:~/Work/app"));
     }
 
     #[test]

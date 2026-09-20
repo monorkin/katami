@@ -264,9 +264,7 @@ fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> 
     let mut sections = Vec::new();
 
     if let Some(cwd) = request.payload["cwd"].as_str() {
-        let project = project::at(Path::new(cwd));
-        memory.settle_project(&project)?;
-        let entity = project.entity;
+        let entity = memory.settle_project(&project::at(Path::new(cwd)))?;
         for card in all.iter().filter(|it| it.kind == Kind::Card) {
             if card.entity.as_deref() == Some(entity.as_str()) {
                 included.push(card.id);

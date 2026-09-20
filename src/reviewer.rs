@@ -207,8 +207,7 @@ fn enqueue(source: &Source, cwd: Option<&Path>) -> Result<()> {
 
     let entity = cwd.map(|it| {
         let project = project::at(it);
-        let _ = memory.settle_project(&project);
-        project.entity
+        memory.settle_project(&project).unwrap_or(project.entity)
     });
     let key = source.cursor_key();
     let chunk = NewReviewChunk {

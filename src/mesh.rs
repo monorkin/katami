@@ -30,7 +30,7 @@ use std::time::Duration;
 use crate::fsutil;
 use crate::id::Id;
 use crate::logs;
-use crate::memory::Memory;
+use crate::memory::{Memory, ProjectRoot, Rename};
 use crate::paths;
 use crate::peers::{Peer, PeerCard};
 use crate::replica::{Delta, Knowledge, Tally};
@@ -67,6 +67,8 @@ enum Message {
 struct Gossip {
     peers: Vec<PeerCard>,
     shared: Vec<SharedValue>,
+    renames: Vec<Rename>,
+    roots: Vec<ProjectRoot>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -316,12 +318,18 @@ fn gossip_of(memory: &Memory) -> Result<Gossip> {
     Ok(Gossip {
         peers: memory.peer_cards()?,
         shared: memory.shared_values()?,
+        renames: memory.renames()?,
+        roots: memory.project_roots()?,
     })
 }
 
+/// Roots before renames: a rename is only acted on by a machine that can
+/// check it against the root commit it arrived with.
 fn hear(memory: &Memory, gossip: &Gossip) -> Result<()> {
     memory.hear_of(&gossip.peers)?;
-    memory.hear_shared(&gossip.shared)
+    memory.hear_shared(&gossip.shared)?;
+    memory.hear_project_roots(&gossip.roots)?;
+    memory.hear_renames(&gossip.renames)
 }
 
 fn admit(memory: &Memory, hello: &Hello, remote: IpAddr) -> Result<Message> {
