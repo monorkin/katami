@@ -42,6 +42,12 @@ Relays and codex hooks also write into real config — sandbox those too with
   Models are checksum-pinned downloads (`models.rs`); without them search
   degrades to BM25 and the top hits go out unjudged. To try it in a sandbox,
   symlink each model dir into `$XDG_DATA_HOME/katami/models/`.
+- **`project.rs`** names the project a session is in: the normalized `origin`
+  remote (`project:github.com/acme/app`), so the name holds on any machine,
+  or the path when there's no origin. Every path a checkout is reached
+  through is an alias, and `Memory::settle_project` re-homes memories from
+  aliases on the spot — which is also how path-named stores migrate. A changed
+  remote only inherits the old name's memories when the root commit matches.
 - **`reviewer.rs`** runs after a session stops: transcript delta → durable
   `review_chunks` queue → `distiller.rs` (haiku via `claude -p`) → validated
   JSON applied in one transaction. **The reviewer and curator always use

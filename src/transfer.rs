@@ -275,6 +275,7 @@ fn report(memory: &Memory, outcome: &Outcome) -> Result<()> {
     for id in &outcome.added {
         if let Some(entity) = memory.get(*id)?.entity
             && let Some(directory) = entity.strip_prefix("project:")
+            && directory.starts_with('/')
             && !Path::new(directory).is_dir()
             && !homeless.contains(&entity)
         {

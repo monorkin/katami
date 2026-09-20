@@ -19,13 +19,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 
-use crate::cards;
 use crate::curator;
 use crate::hook_protocol::{self, HookRequest, Tool};
 use crate::launches;
 use crate::logs;
 use crate::memory::{Kind, Memory};
 use crate::paths;
+use crate::project;
 use crate::pty::{self, RawGuard};
 use crate::reranker;
 use crate::reviewer;
@@ -262,8 +262,9 @@ fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> 
     let mut sections = Vec::new();
 
     if let Some(cwd) = request.payload["cwd"].as_str() {
-        let entity = cards::canonical_project_entity(Path::new(cwd));
-        memory.record_alias(&cards::project_entity(Path::new(cwd)), &entity)?;
+        let project = project::at(Path::new(cwd));
+        memory.settle_project(&project)?;
+        let entity = project.entity;
         for card in all.iter().filter(|it| it.kind == Kind::Card) {
             if card.entity.as_deref() == Some(entity.as_str()) {
                 included.push(card.id);

@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::clock::timestamp;
+use crate::project::Project;
 
 pub struct Memory {
     pub connection: Connection,
@@ -184,6 +185,17 @@ const MIGRATE_4_TO_5: &str = "
     PRAGMA user_version = 5;
 ";
 
+/// v6 remembers each project's root commit — the proof, when a checkout's
+/// remote changes, that the old name and the new one are the same repository.
+const MIGRATE_5_TO_6: &str = "
+    CREATE TABLE project_roots (
+        entity TEXT PRIMARY KEY,
+        root_commit TEXT NOT NULL
+    );
+
+    PRAGMA user_version = 6;
+";
+
 pub struct NewReviewChunk {
     pub transcript_path: String,
     pub source_session: Option<String>,
@@ -333,6 +345,9 @@ impl Memory {
             }
             if memory.schema_version()? == 4 {
                 memory.connection.execute_batch(MIGRATE_4_TO_5)?;
+            }
+            if memory.schema_version()? == 5 {
+                memory.connection.execute_batch(MIGRATE_5_TO_6)?;
             }
             Ok(())
         })
@@ -488,7 +503,12 @@ impl Memory {
                 judged_at TEXT NOT NULL
             );
 
-            PRAGMA user_version = 5;
+            CREATE TABLE project_roots (
+                entity TEXT PRIMARY KEY,
+                root_commit TEXT NOT NULL
+            );
+
+            PRAGMA user_version = 6;
             ",
         )?;
         Ok(())
@@ -731,6 +751,39 @@ impl Memory {
         Ok(())
     }
 
+    /// Files every path the project was reached through under its name, and
+    /// moves the memories home right away — the session that's starting is
+    /// about to look them up. When a path used to lead to a different name
+    /// and the root commit says it's the same repository, the old name
+    /// becomes an alias too: that's a rename, not a reused directory.
+    pub fn settle_project(&self, project: &Project) -> Result<()> {
+        self.with_transaction(|memory| {
+            for alias in &project.aliases {
+                if let Some(root_commit) = &project.root_commit
+                    && let Some(previous) = memory.canonical_entity_for(alias)?
+                    && previous != project.entity
+                    && memory.root_commit_of(&previous)?.as_ref() == Some(root_commit)
+                {
+                    memory.record_alias(&previous, &project.entity)?;
+                }
+                memory.record_alias(alias, &project.entity)?;
+            }
+
+            if let Some(root_commit) = &project.root_commit {
+                memory.connection.execute(
+                    "INSERT INTO project_roots (entity, root_commit) VALUES (?1, ?2)
+                     ON CONFLICT (entity) DO UPDATE SET root_commit = ?2",
+                    rusqlite::params![project.entity, root_commit],
+                )?;
+            }
+            memory.rehome_aliased_entities()?;
+            Ok(())
+        })
+    }
+
+    /// A canonical name is never itself an alias: whatever pointed at the new
+    /// alias now points past it, and the canonical name stops being an alias
+    /// for anything, so chains and cycles can't form.
     pub fn record_alias(&self, alias: &str, canonical_entity: &str) -> Result<()> {
         if alias == canonical_entity {
             return Ok(());
@@ -740,7 +793,31 @@ impl Memory {
              ON CONFLICT (alias) DO UPDATE SET canonical_entity = ?2, last_seen = ?3",
             rusqlite::params![alias, canonical_entity, timestamp()],
         )?;
+        self.connection.execute(
+            "UPDATE entity_aliases SET canonical_entity = ?2 WHERE canonical_entity = ?1",
+            rusqlite::params![alias, canonical_entity],
+        )?;
+        self.connection.execute(
+            "DELETE FROM entity_aliases WHERE alias = ?1",
+            rusqlite::params![canonical_entity],
+        )?;
         Ok(())
+    }
+
+    fn canonical_entity_for(&self, alias: &str) -> Result<Option<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT canonical_entity FROM entity_aliases WHERE alias = ?1")?;
+        let mut rows = statement.query_map([alias], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    fn root_commit_of(&self, entity: &str) -> Result<Option<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT root_commit FROM project_roots WHERE entity = ?1")?;
+        let mut rows = statement.query_map([entity], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
     }
 
     /// Memories filed under a path that later resolved to a canonical project
@@ -1278,6 +1355,71 @@ mod tests {
         let neighbors_of_second = memory.neighbors(second).unwrap();
         assert_eq!(neighbors_of_second.len(), 1);
         assert_eq!(neighbors_of_second[0].title, "ax uses flocks");
+    }
+
+    fn observation_about(memory: &Memory, entity: &str, title: &str) -> i64 {
+        memory
+            .add(&NewMemory {
+                kind: Kind::Observation,
+                entity: Some(entity.into()),
+                title: title.into(),
+                body: "Body.".into(),
+                links: vec![],
+                source_session: None,
+                class: None,
+            })
+            .unwrap()
+    }
+
+    fn checkout(entity: &str, paths: &[&str], root_commit: &str) -> Project {
+        Project {
+            entity: entity.into(),
+            aliases: paths.iter().map(|it| format!("project:{it}")).collect(),
+            root_commit: Some(root_commit.into()),
+        }
+    }
+
+    #[test]
+    fn settling_a_project_moves_its_path_named_memories_home() {
+        let memory = Memory::open_in_memory().unwrap();
+        let from_root = observation_about(&memory, "project:/home/someone/app", "From the root");
+        let from_worktree = observation_about(&memory, "project:/home/someone/app-wt", "From a worktree");
+        let unrelated = observation_about(&memory, "project:/home/someone/other", "Unrelated");
+
+        let app = "project:example.com/acme/app";
+        memory
+            .settle_project(&checkout(app, &["/home/someone/app-wt", "/home/someone/app"], "aaa"))
+            .unwrap();
+
+        assert_eq!(memory.get(from_root).unwrap().entity.as_deref(), Some(app));
+        assert_eq!(memory.get(from_worktree).unwrap().entity.as_deref(), Some(app));
+        assert_eq!(
+            memory.get(unrelated).unwrap().entity.as_deref(),
+            Some("project:/home/someone/other")
+        );
+    }
+
+    #[test]
+    fn a_renamed_remote_takes_its_memories_along_but_a_reused_directory_does_not() {
+        let memory = Memory::open_in_memory().unwrap();
+        let old_name = "project:example.com/acme/app";
+        memory.settle_project(&checkout(old_name, &["/home/someone/app"], "aaa")).unwrap();
+        let learned = observation_about(&memory, old_name, "Learned before the rename");
+
+        let new_name = "project:example.com/acme/application";
+        memory.settle_project(&checkout(new_name, &["/home/someone/app"], "aaa")).unwrap();
+        assert_eq!(memory.get(learned).unwrap().entity.as_deref(), Some(new_name));
+
+        let elsewhere = observation_about(&memory, old_name, "Synced in under the old name");
+        memory.settle_project(&checkout(new_name, &["/home/someone/app"], "aaa")).unwrap();
+        assert_eq!(memory.get(elsewhere).unwrap().entity.as_deref(), Some(new_name));
+
+        let different = "project:example.com/acme/something-else";
+        memory.settle_project(&checkout(different, &["/home/someone/app"], "bbb")).unwrap();
+        assert_eq!(memory.get(learned).unwrap().entity.as_deref(), Some(new_name));
+
+        memory.settle_project(&checkout(old_name, &["/home/someone/app"], "bbb")).unwrap();
+        assert_eq!(memory.get(learned).unwrap().entity.as_deref(), Some(new_name));
     }
 
     #[test]

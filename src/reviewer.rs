@@ -26,6 +26,7 @@ use crate::hook_protocol::Tool;
 use crate::logs;
 use crate::memory::{CLASSES, Kind, Memory, NewMemory, NewReviewChunk, ReviewChunk};
 use crate::paths;
+use crate::project;
 use crate::search;
 use crate::transcript::{self, Source};
 use crate::transcript_codex;
@@ -199,9 +200,9 @@ fn enqueue(source: &Source, cwd: Option<&Path>) -> Result<()> {
     }
 
     let entity = cwd.map(|it| {
-        let canonical = cards::canonical_project_entity(it);
-        let _ = memory.record_alias(&cards::project_entity(it), &canonical);
-        canonical
+        let project = project::at(it);
+        let _ = memory.settle_project(&project);
+        project.entity
     });
     let key = source.cursor_key();
     let chunk = NewReviewChunk {

@@ -24,6 +24,7 @@ use crate::fsutil;
 use crate::logs;
 use crate::memory::{Kind, Memory, NewMemory};
 use crate::paths;
+use crate::project;
 
 const CONSOLIDATE_AT: usize = 3;
 
@@ -108,7 +109,20 @@ fn archive_never_retrieved(memory: &Memory) -> Result<()> {
     Ok(())
 }
 
+/// A session only settles the project it starts in, so a project nobody has
+/// opened lately would keep its path for a name — and a path names nothing
+/// on the other machines memory is shared with. Any that still has its
+/// checkout here gets its proper name now.
 fn rehome_aliased_memories(memory: &Memory) -> Result<()> {
+    for entity in memory.entities()? {
+        if let Some(path) = entity.strip_prefix("project:")
+            && path.starts_with('/')
+            && Path::new(path).is_dir()
+        {
+            memory.settle_project(&project::at(Path::new(path)))?;
+        }
+    }
+
     let moved = memory.rehome_aliased_entities()?;
     if moved > 0 {
         log(&format!("re-homed {moved} memories onto canonical project entities"));

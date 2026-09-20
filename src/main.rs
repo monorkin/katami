@@ -18,6 +18,7 @@ mod memory_cli;
 mod models;
 mod overlay;
 mod paths;
+mod project;
 mod pty;
 mod relays;
 mod reranker;

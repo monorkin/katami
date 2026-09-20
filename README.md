@@ -105,7 +105,10 @@ Two tool-specific notes:
   wound the session.
 - **Memory.** One shared SQLite store under `~/.local/share/katami/memory/`:
   observations, entity cards (one per person or project, rendered as markdown
-  in `memory/cards/`), and `[[links]]` between them. On every prompt the
+  in `memory/cards/`), and `[[links]]` between them. A project is named after
+  its `origin` remote (`github.com/acme/app`), not its folder, so its
+  memories follow it across worktrees, moves, renames, and machines; a folder
+  without a remote keeps its path. On every prompt the
   supervisor runs a hybrid search — FTS5 BM25 fused with static
   [Model2Vec](https://github.com/MinishLab/model2vec) embeddings, all local,
   microseconds, zero model tokens. Search can only rank, so a small
