@@ -85,6 +85,7 @@ pub fn run(config_dir: &Path) -> Result<()> {
 
     memory.set_state("curator_last_run", &clock::timestamp())?;
     log("curated");
+    crate::mesh::sync_all_quietly();
     Ok(())
 }
 

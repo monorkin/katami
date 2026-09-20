@@ -186,9 +186,13 @@ fn spawn_detached(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Resu
     Ok(())
 }
 
+/// New memories are made here, after the session and its supervisor may be
+/// gone, so this is the moment to hand them to whichever peers are around.
 pub fn run(source: &Source, config_dir: &Path, cwd: Option<&Path>) -> Result<()> {
     enqueue(source, cwd)?;
-    drain(config_dir)
+    drain(config_dir)?;
+    crate::mesh::sync_all_quietly();
+    Ok(())
 }
 
 /// Turns the delta into a durable chunk and advances the cursor in the same

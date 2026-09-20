@@ -119,17 +119,33 @@ pub fn import(path: &Path, on_collision: OnCollision, config_dir: &Path) -> Resu
     let memory = Memory::open(&paths::memory_dir())?;
     let outcome = import_into(&memory, arriving, on_collision, config_dir)?;
 
-    for id in outcome.added.iter().chain(&outcome.replaced).chain(&outcome.merged) {
+    let arrived: Vec<Id> = outcome
+        .added
+        .iter()
+        .chain(&outcome.replaced)
+        .chain(&outcome.merged)
+        .copied()
+        .collect();
+    refresh_derived(&memory, &arrived)?;
+    report(&memory, &outcome)
+}
+
+/// Embeddings and rendered cards are made from a memory, never moved with
+/// it, so whatever brings memories in — a bundle or a peer — rebuilds them.
+pub fn refresh_derived(memory: &Memory, ids: &[Id]) -> Result<()> {
+    for id in ids {
         let stored = memory.get(*id)?;
         if stored.kind != Kind::Status {
-            embeddings::embed_into(&memory, *id, &format!("{}\n{}", stored.title, stored.body))?;
+            embeddings::embed_into(memory, *id, &format!("{}\n{}", stored.title, stored.body))?;
         }
-        if stored.kind == Kind::Card && !stored.archived {
-            cards::render(&stored, &paths::memory_dir().join("cards"))?;
+        if stored.kind == Kind::Card
+            && !stored.archived
+            && let Some(cards_dir) = memory.cards_dir()
+        {
+            cards::render(&stored, &cards_dir)?;
         }
     }
-
-    report(&memory, &outcome)
+    Ok(())
 }
 
 pub fn import_into(

@@ -96,6 +96,7 @@ impl HookServer {
         thread::spawn(|| {
             let _ = crate::embeddings::embed("warm up the model before the first prompt");
         });
+        crate::mesh::start();
 
         let socket_path = directory.join(format!("{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket_path);

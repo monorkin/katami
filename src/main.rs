@@ -12,13 +12,16 @@ mod hook_protocol;
 mod id;
 mod launch;
 mod launches;
+mod link_cli;
 mod log_cli;
 mod logs;
 mod memory;
 mod memory_cli;
+mod mesh;
 mod models;
 mod overlay;
 mod paths;
+mod peers;
 mod project;
 mod pty;
 mod relays;
@@ -28,6 +31,7 @@ mod reviewer;
 mod search;
 mod setup;
 mod supervisor;
+mod tailscale;
 mod transcript;
 mod transcript_codex;
 mod transcript_opencode;
@@ -88,6 +92,20 @@ enum Command {
     Curate {
         #[usage(long)]
         config_dir: PathBuf,
+    },
+    /// Share memory with another of your machines over Tailscale; bare, shows who's linked
+    Link {
+        /// Hostname or IP of any machine already in the mesh
+        host: Option<String>,
+        /// Let in a machine that isn't yours by Tailscale's word, by the code it shows
+        #[usage(long)]
+        accept: Option<String>,
+        /// Take a machine out of the mesh, everywhere
+        #[usage(long)]
+        remove: Option<String>,
+        /// Listen for other machines without a session running
+        #[usage(long)]
+        serve: bool,
     },
     /// Show what the supervisor, reviewer, and curator have been doing
     Log {
@@ -185,6 +203,8 @@ enum MemoryCommand {
         #[usage(long)]
         merge: bool,
     },
+    /// Sync with every linked machine that can be reached, now
+    Sync,
     /// Download the models that power semantic search and relevance judging
     PullModels,
     /// Consolidate observations into cards and archive unused skills now
@@ -215,11 +235,12 @@ enum ShellCompletionCommand {
 
 /// The reserved words that name a katami subcommand rather than a coding tool
 /// to supervise. Anything else in the first position is a launcher.
-const SUBCOMMANDS: [&str; 10] = [
+const SUBCOMMANDS: [&str; 11] = [
     "hook",
     "review",
     "relays",
     "curate",
+    "link",
     "log",
     "memory",
     "setup",
@@ -262,6 +283,14 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Curate { config_dir } => curator::run(&config_dir),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
+        Command::Link { host, accept, remove, serve } => match (host, accept, remove, serve) {
+            (Some(host), None, None, false) => link_cli::link(&host),
+            (None, Some(code), None, false) => link_cli::accept(&code),
+            (None, None, Some(name), false) => link_cli::remove(&name),
+            (None, None, None, true) => link_cli::serve(),
+            (None, None, None, false) => link_cli::status(),
+            _ => anyhow::bail!("`katami link` does one thing at a time — a host, --accept, --remove, or --serve"),
+        },
         Command::Setup => setup::run(),
         Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::Memory { command } => match command {
@@ -303,6 +332,7 @@ fn run(cli: Cli) -> Result<()> {
                 };
                 transfer::import(&path, on_collision, &paths::claude_config_home())
             }
+            MemoryCommand::Sync => link_cli::sync(),
             MemoryCommand::PullModels => embeddings::pull().and_then(|_| reranker::pull()),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),
         },

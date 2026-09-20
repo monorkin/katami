@@ -10,7 +10,7 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::clock::timestamp;
 use crate::id::Id;
@@ -18,6 +18,7 @@ use crate::project::Project;
 
 pub struct Memory {
     pub connection: Connection,
+    directory: Option<PathBuf>,
 }
 
 pub struct NewMemory {
@@ -328,8 +329,18 @@ const MIGRATE_7_TO_8: &str = "
         name TEXT NOT NULL,
         address TEXT NOT NULL,
         token TEXT,
+        removed INTEGER NOT NULL DEFAULT 0,
         updated TEXT NOT NULL,
         last_synced TEXT
+    );
+
+    CREATE TABLE pairings (
+        code TEXT PRIMARY KEY,
+        node TEXT NOT NULL,
+        name TEXT NOT NULL,
+        address TEXT NOT NULL,
+        token TEXT,
+        requested TEXT NOT NULL
     );
 ";
 
@@ -491,7 +502,7 @@ impl Memory {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_millis(2000))?;
 
-        let memory = Memory { connection };
+        let memory = Memory { connection, directory: Some(directory.to_path_buf()) };
         memory.migrate()?;
         Ok(memory)
     }
@@ -500,9 +511,16 @@ impl Memory {
     pub fn open_in_memory() -> Result<Memory> {
         let memory = Memory {
             connection: Connection::open_in_memory()?,
+            directory: None,
         };
         memory.migrate()?;
         Ok(memory)
+    }
+
+    /// Where this store's cards are rendered for people to read; a store that
+    /// lives only in memory has nowhere to put them.
+    pub fn cards_dir(&self) -> Option<PathBuf> {
+        self.directory.as_ref().map(|it| it.join("cards"))
     }
 
     fn migrate(&self) -> Result<()> {
@@ -1649,7 +1667,7 @@ mod tests {
     fn counted_ids_migrate_to_global_ones_with_everything_still_attached() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(V6_STORE).unwrap();
-        let memory = Memory { connection };
+        let memory = Memory { connection, directory: None };
         memory.migrate().unwrap();
 
         let ids = memory.ids().unwrap();
