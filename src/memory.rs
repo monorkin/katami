@@ -310,6 +310,10 @@ const MEMORY_TABLES: &str = "
 /// others so that two machines merging the same pair don't then have to
 /// merge their merges. A link is part of its memory, so changing one touches
 /// the memory and stamps it.
+///
+/// The logs — deliveries, relevance judgments, evidence, skill usage — get
+/// dots from the same clock. Their rows are written once and never changed,
+/// so they need no version: a row either has arrived or it hasn't.
 const MIGRATE_7_TO_8: &str = "
     ALTER TABLE memories ADD COLUMN dot_node TEXT;
     ALTER TABLE memories ADD COLUMN dot_seq INTEGER;
@@ -343,8 +347,7 @@ const MIGRATE_7_TO_8: &str = "
         token TEXT,
         removed INTEGER NOT NULL DEFAULT 0,
         updated TEXT NOT NULL,
-        last_synced TEXT,
-        marks_sent TEXT
+        last_synced TEXT
     );
 
     CREATE TABLE shared_state (
@@ -354,14 +357,21 @@ const MIGRATE_7_TO_8: &str = "
         node TEXT NOT NULL
     );
 
-    CREATE TABLE usage_marks (
-        memory_id TEXT NOT NULL,
-        node TEXT NOT NULL,
-        last_delivered TEXT NOT NULL,
-        learned TEXT NOT NULL,
-        PRIMARY KEY (memory_id, node)
-    );
-    CREATE INDEX usage_marks_by_learned ON usage_marks(learned);
+    ALTER TABLE memory_deliveries ADD COLUMN dot_node TEXT;
+    ALTER TABLE memory_deliveries ADD COLUMN dot_seq INTEGER;
+    CREATE UNIQUE INDEX deliveries_by_dot ON memory_deliveries(dot_node, dot_seq);
+
+    ALTER TABLE relevance_judgments ADD COLUMN dot_node TEXT;
+    ALTER TABLE relevance_judgments ADD COLUMN dot_seq INTEGER;
+    CREATE UNIQUE INDEX judgments_by_dot ON relevance_judgments(dot_node, dot_seq);
+
+    ALTER TABLE memory_evidence ADD COLUMN dot_node TEXT;
+    ALTER TABLE memory_evidence ADD COLUMN dot_seq INTEGER;
+    CREATE UNIQUE INDEX evidence_by_dot ON memory_evidence(dot_node, dot_seq);
+
+    ALTER TABLE usage ADD COLUMN dot_node TEXT;
+    ALTER TABLE usage ADD COLUMN dot_seq INTEGER;
+    CREATE UNIQUE INDEX usage_by_dot ON usage(dot_node, dot_seq);
 
     CREATE TABLE pairings (
         code TEXT PRIMARY KEY,
@@ -401,6 +411,38 @@ const STAMP_TRIGGERS: &str = "
 
     CREATE TRIGGER links_stamp_delete AFTER DELETE ON links BEGIN
         UPDATE memories SET updated = updated WHERE id = old.from_id;
+    END;
+
+    CREATE TRIGGER deliveries_stamp AFTER INSERT ON memory_deliveries
+    WHEN new.dot_node IS NULL BEGIN
+        UPDATE sync_clock SET seq = seq + 1;
+        UPDATE memory_deliveries
+        SET dot_node = (SELECT node FROM sync_clock), dot_seq = (SELECT seq FROM sync_clock)
+        WHERE rowid = new.rowid;
+    END;
+
+    CREATE TRIGGER judgments_stamp AFTER INSERT ON relevance_judgments
+    WHEN new.dot_node IS NULL BEGIN
+        UPDATE sync_clock SET seq = seq + 1;
+        UPDATE relevance_judgments
+        SET dot_node = (SELECT node FROM sync_clock), dot_seq = (SELECT seq FROM sync_clock)
+        WHERE rowid = new.rowid;
+    END;
+
+    CREATE TRIGGER evidence_stamp AFTER INSERT ON memory_evidence
+    WHEN new.dot_node IS NULL BEGIN
+        UPDATE sync_clock SET seq = seq + 1;
+        UPDATE memory_evidence
+        SET dot_node = (SELECT node FROM sync_clock), dot_seq = (SELECT seq FROM sync_clock)
+        WHERE rowid = new.rowid;
+    END;
+
+    CREATE TRIGGER usage_stamp AFTER INSERT ON usage
+    WHEN new.dot_node IS NULL BEGIN
+        UPDATE sync_clock SET seq = seq + 1;
+        UPDATE usage
+        SET dot_node = (SELECT node FROM sync_clock), dot_seq = (SELECT seq FROM sync_clock)
+        WHERE rowid = new.rowid;
     END;
 ";
 
@@ -728,12 +770,17 @@ impl Memory {
                 dot_seq = local_row,
                 version = json_object((SELECT node FROM sync_clock), local_row);
             UPDATE sync_clock SET seq = COALESCE((SELECT MAX(local_row) FROM memories), 0);
-
-            INSERT INTO usage_marks (memory_id, node, last_delivered, learned)
-            SELECT memory_id, (SELECT node FROM sync_clock), substr(MAX(delivered_at), 1, 10), MAX(delivered_at)
-            FROM memory_deliveries GROUP BY memory_id;
             ",
         )?;
+        for log in ["memory_deliveries", "relevance_judgments", "memory_evidence", "usage"] {
+            self.connection.execute_batch(&format!(
+                "
+                UPDATE {log}
+                SET dot_node = (SELECT node FROM sync_clock), dot_seq = (SELECT seq FROM sync_clock) + rowid;
+                UPDATE sync_clock SET seq = COALESCE((SELECT MAX(dot_seq) FROM {log}), seq);
+                "
+            ))?;
+        }
         self.connection.execute_batch(STAMP_TRIGGERS)?;
         self.connection.execute_batch("PRAGMA user_version = 8;")?;
         Ok(())
@@ -1035,16 +1082,16 @@ impl Memory {
         Ok(())
     }
 
-    /// The delivery log stays on this machine; that the memory got used at
-    /// all is marked for the mesh, since that's what keeps it from being
-    /// retired by a machine that never works on this project.
+    /// The delivery log is shared with the mesh, which is what keeps a memory
+    /// from being retired for disuse by a machine that never works on the
+    /// project it belongs to.
     pub fn record_delivery(&self, memory_id: Id, session_id: &str, event: &str, form: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![memory_id, session_id, event, form, timestamp()],
         )?;
-        self.mark_used(memory_id)
+        Ok(())
     }
 
     pub fn record_judgment(
@@ -1394,9 +1441,6 @@ impl Memory {
                AND (m.class IS NULL OR m.class IN ({retirable}))
                AND NOT EXISTS (
                  SELECT 1 FROM memory_deliveries d WHERE d.memory_id = m.id
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM usage_marks u WHERE u.memory_id = m.id
                )"
         ))?;
         let rows = statement.query_map([], row_to_stored)?;
@@ -1780,6 +1824,8 @@ mod tests {
             name TEXT PRIMARY KEY, description TEXT NOT NULL, instructions TEXT NOT NULL,
             created TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE usage (kind TEXT NOT NULL, name TEXT NOT NULL, session_id TEXT NOT NULL, used_at TEXT NOT NULL);
+        INSERT INTO usage VALUES ('skill', 'katami-deploy-check', 's1', '2026-09-06T00:00:00Z');
         INSERT INTO generated_skills VALUES
             ('deploy-check', 'Verify a deploy', '1. Check the logs.', '2026-09-05T00:00:00Z', 0),
             ('old-habit', 'No longer done', '1. Nothing.', '2026-09-04T00:00:00Z', 1);
@@ -1829,6 +1875,24 @@ mod tests {
 
         let hits = crate::search::bm25(&memory, "rebase feature branches", 5).unwrap();
         assert_eq!(hits.iter().map(|it| it.id).collect::<Vec<_>>(), vec![ids[0]]);
+
+        let dots: Vec<i64> = memory
+            .connection
+            .prepare(
+                "SELECT dot_seq FROM memories UNION ALL SELECT dot_seq FROM memory_deliveries
+                 UNION ALL SELECT dot_seq FROM relevance_judgments UNION ALL SELECT dot_seq FROM memory_evidence
+                 UNION ALL SELECT dot_seq FROM usage",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let mut distinct = dots.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(dots.len(), 9);
+        assert_eq!(distinct.len(), 9, "every old row gets a dot of its own: {dots:?}");
 
         let skills = memory.generated_skills().unwrap();
         assert_eq!(skills.len(), 1);

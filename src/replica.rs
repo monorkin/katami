@@ -15,7 +15,7 @@
 //! local version as a sibling until the two are merged, and it's passed on to
 //! peers meanwhile so it can't be lost with this machine.
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -49,8 +49,53 @@ pub struct Knowledge(BTreeMap<Id, u64>);
 
 impl Knowledge {
     pub fn covers(&self, dot: &Dot) -> bool {
-        self.0.get(&dot.node).is_some_and(|seq| *seq >= dot.seq)
+        self.caught_up_with(&dot.node) >= dot.seq
     }
+
+    fn caught_up_with(&self, node: &Id) -> u64 {
+        self.0.get(node).copied().unwrap_or(0)
+    }
+}
+
+/// The logs katami keeps about its memories: when each was delivered, how
+/// the reranker judged it, which turns of a conversation it came from, and
+/// when a skill got used. A row is written once and never changed, so it
+/// shares by simply turning up — no versions, nothing to conflict. The
+/// column lists are all there is to know about a log, so they're data.
+struct Log {
+    table: &'static str,
+    columns: &'static [&'static str],
+}
+
+const LOGS: [Log; 4] = [
+    Log {
+        table: "memory_deliveries",
+        columns: &["memory_id", "session_id", "event", "form", "delivered_at"],
+    },
+    Log {
+        table: "relevance_judgments",
+        columns: &["memory_id", "session_id", "prompt", "model", "logit", "judged_at"],
+    },
+    Log {
+        table: "memory_evidence",
+        columns: &["memory_id", "source_session", "turn_id", "role", "excerpt"],
+    },
+    Log {
+        table: "usage",
+        columns: &["kind", "name", "session_id", "used_at"],
+    },
+];
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogRows {
+    pub table: String,
+    pub rows: Vec<LogRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogRow {
+    pub dot: Dot,
+    pub values: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,6 +103,7 @@ pub struct Delta {
     pub node: Id,
     pub knowledge: Knowledge,
     pub records: Vec<Record>,
+    pub logs: Vec<LogRows>,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -115,6 +161,10 @@ impl Memory {
             node: self.node()?,
             knowledge: self.knowledge()?,
             records,
+            logs: LOGS
+                .iter()
+                .map(|it| self.log_rows_beyond(it, theirs))
+                .collect::<Result<Vec<_>>>()?,
         })
     }
 
@@ -129,6 +179,9 @@ impl Memory {
                     Absorbed::Conflicted => tally.conflicted.push(record.memory.id),
                     Absorbed::Ignored => {}
                 }
+            }
+            for rows in &delta.logs {
+                memory.absorb_log_rows(rows)?;
             }
             memory.learn(&delta.knowledge)?;
             Ok(tally)
@@ -201,6 +254,63 @@ impl Memory {
             )?;
             memory.drop_sibling(merged.id, &sibling.dot)
         })
+    }
+
+    /// The rows of one log that `theirs` hasn't caught up with, asked for
+    /// node by node so the index on the dot does the work and the whole log
+    /// is never read.
+    fn log_rows_beyond(&self, log: &Log, theirs: &Knowledge) -> Result<LogRows> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("SELECT DISTINCT dot_node FROM {} WHERE dot_node IS NOT NULL", log.table))?;
+        let nodes = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<Id>>>()?;
+
+        let mut rows = Vec::new();
+        for node in nodes {
+            let mut statement = self.connection.prepare(&format!(
+                "SELECT dot_seq, {} FROM {} WHERE dot_node = ?1 AND dot_seq > ?2 ORDER BY dot_seq",
+                log.columns.join(", "),
+                log.table
+            ))?;
+            let beyond = statement.query_map(rusqlite::params![node, theirs.caught_up_with(&node)], |row| {
+                let values = (1..=log.columns.len())
+                    .map(|column| row.get_ref(column).map(json_of))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(LogRow { dot: Dot { node, seq: row.get(0)? }, values })
+            })?;
+            rows.extend(beyond.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok(LogRows { table: log.table.to_string(), rows })
+    }
+
+    /// A row that's already here is recognized by its dot and skipped, which
+    /// is all the conflict handling a write-once log needs. The table name
+    /// came off the wire, so it's only ever used to pick one of ours.
+    fn absorb_log_rows(&self, arriving: &LogRows) -> Result<()> {
+        let log = LOGS
+            .iter()
+            .find(|it| it.table == arriving.table)
+            .with_context(|| format!("a peer sent rows for `{}`, which isn't a log this katami shares — upgrade with `katami upgrade`", arriving.table))?;
+
+        let placeholders: Vec<String> = (1..=log.columns.len() + 2).map(|it| format!("?{it}")).collect();
+        let mut statement = self.connection.prepare(&format!(
+            "INSERT OR IGNORE INTO {} ({}, dot_node, dot_seq) VALUES ({})",
+            log.table,
+            log.columns.join(", "),
+            placeholders.join(", ")
+        ))?;
+        for row in &arriving.rows {
+            if row.values.len() != log.columns.len() {
+                bail!("a peer sent a malformed `{}` row", log.table);
+            }
+            let mut values: Vec<rusqlite::types::Value> = row.values.iter().map(sql_of).collect();
+            values.push(rusqlite::types::Value::Text(row.dot.node.to_string()));
+            values.push(rusqlite::types::Value::Integer(row.dot.seq as i64));
+            statement.execute(rusqlite::params_from_iter(values))?;
+        }
+        Ok(())
     }
 
     fn absorb_concurrent(&self, local: &Record, arriving: &Record) -> Result<Absorbed> {
@@ -297,6 +407,30 @@ impl Memory {
             rusqlite::params![id, dot.node, dot.seq],
         )?;
         Ok(())
+    }
+}
+
+fn json_of(value: rusqlite::types::ValueRef) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(integer) => integer.into(),
+        ValueRef::Real(real) => real.into(),
+        ValueRef::Text(text) => String::from_utf8_lossy(text).into_owned().into(),
+        ValueRef::Blob(_) => serde_json::Value::Null,
+    }
+}
+
+fn sql_of(value: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    match value {
+        serde_json::Value::String(text) => Value::Text(text.clone()),
+        serde_json::Value::Number(number) => match number.as_i64() {
+            Some(integer) => Value::Integer(integer),
+            None => Value::Real(number.as_f64().unwrap_or_default()),
+        },
+        serde_json::Value::Bool(flag) => Value::Integer(*flag as i64),
+        _ => Value::Null,
     }
 }
 
@@ -403,6 +537,63 @@ mod tests {
             assert_eq!(body(machine, id), "We deploy on Fridays after standup, never before a holiday.");
             assert!(machine.conflicted_ids().unwrap().is_empty());
         }
+    }
+
+    fn count(memory: &Memory, table: &str) -> i64 {
+        memory
+            .connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_logs_travel_with_the_memories_and_never_double_up() {
+        let (mini, desktop, laptop) = (store(), store(), store());
+        let id = learn(&laptop, "Deploy on Fridays", "We deploy on Fridays.");
+        laptop.record_delivery(id, "session-1", "prompt", "full").unwrap();
+        laptop.record_judgment(id, "session-1", "when do we deploy?", "ms-marco-MiniLM-L6-v2", 3.0).unwrap();
+        laptop.add_evidence(id, Some("session-1"), "N1", "user", "we deploy on fridays").unwrap();
+        laptop.record_usage("skill", "katami-deploy-check", "session-1").unwrap();
+
+        pull(&desktop, &laptop);
+        pull(&mini, &desktop);
+        pull(&mini, &laptop);
+        pull(&laptop, &mini);
+
+        for machine in [&mini, &desktop, &laptop] {
+            for log in ["memory_deliveries", "relevance_judgments", "memory_evidence", "usage"] {
+                assert_eq!(count(machine, log), 1, "{log}");
+            }
+        }
+        let logit: f64 = mini
+            .connection
+            .query_row("SELECT logit FROM relevance_judgments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(logit, 3.0);
+        assert_eq!(mini.last_used("skill", "katami-deploy-check").unwrap(), laptop.last_used("skill", "katami-deploy-check").unwrap());
+    }
+
+    #[test]
+    fn a_memory_delivered_on_any_machine_is_not_retirable_on_another() {
+        let (mini, laptop) = (store(), store());
+        let used_on_the_laptop = learn(&mini, "Deploy on Fridays", "We deploy on Fridays.");
+        let used_nowhere = learn(&mini, "Lunch is at noon", "Lunch is at noon.");
+        mini.connection.execute("UPDATE memories SET class = 'history'", []).unwrap();
+        pull(&laptop, &mini);
+
+        laptop.record_delivery(used_on_the_laptop, "session-1", "prompt", "full").unwrap();
+        pull(&mini, &laptop);
+
+        let retirable: Vec<Id> = mini.unretrieved_observations().unwrap().iter().map(|it| it.id).collect();
+        assert_eq!(retirable, vec![used_nowhere]);
+    }
+
+    #[test]
+    fn rows_for_a_log_this_katami_does_not_share_are_refused() {
+        let memory = store();
+        let mut delta = store().delta_for(&memory.knowledge().unwrap()).unwrap();
+        delta.logs.push(LogRows { table: "peers".into(), rows: vec![] });
+        assert!(memory.absorb_delta(&delta).is_err());
     }
 
     #[test]

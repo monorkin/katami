@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::clock::timestamp;
 use crate::fsutil;
 use crate::id::Id;
 use crate::logs;
@@ -35,7 +34,7 @@ use crate::memory::Memory;
 use crate::paths;
 use crate::peers::{Peer, PeerCard};
 use crate::replica::{Delta, Knowledge, Tally};
-use crate::shared::{SharedValue, UsageMark};
+use crate::shared::SharedValue;
 use crate::tailscale;
 use crate::transfer;
 
@@ -62,13 +61,12 @@ enum Message {
     Done,
 }
 
-/// What rides along with the memories: who's in the mesh, the little state it
-/// shares, and which memories got used since these two last spoke.
+/// What rides along with the memories and their logs: who's in the mesh, and
+/// the little state it shares. Small enough to send whole every time.
 #[derive(Serialize, Deserialize, Debug)]
 struct Gossip {
     peers: Vec<PeerCard>,
     shared: Vec<SharedValue>,
-    usage: Vec<UsageMark>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -198,8 +196,7 @@ pub fn sync_with(memory: &Memory, address: &str, token: Option<&str>, pairing_co
     };
     memory.remember_peer(peer, &name, &address.to_string(), granted.as_deref())?;
 
-    let asked = timestamp();
-    send(&mut writer, &Message::Pull { knowledge: memory.knowledge()?, gossip: gossip_for(memory, peer)? })?;
+    send(&mut writer, &Message::Pull { knowledge: memory.knowledge()?, gossip: gossip_of(memory)? })?;
     let Message::Delta { delta, gossip } = receive(&mut reader)? else {
         bail!("{name} did not answer the pull with a delta");
     };
@@ -215,7 +212,6 @@ pub fn sync_with(memory: &Memory, address: &str, token: Option<&str>, pairing_co
 
     transfer::refresh_derived(memory, &received.changed)?;
     memory.mark_synced(peer)?;
-    memory.set_marks_sent_to(peer, &asked)?;
     Ok(Reply::Synced(Exchange { peer, name, received, sent }))
 }
 
@@ -297,8 +293,7 @@ fn serve_connection(stream: TcpStream, store: &Path) -> Result<()> {
         bail!("{} did not pull after its hello", hello.name);
     };
     hear(&memory, &gossip)?;
-    let answered = timestamp();
-    send(&mut writer, &Message::Delta { delta: memory.delta_for(&knowledge)?, gossip: gossip_for(&memory, hello.node)? })?;
+    send(&mut writer, &Message::Delta { delta: memory.delta_for(&knowledge)?, gossip: gossip_of(&memory)? })?;
 
     let Message::Push { delta } = receive(&mut reader)? else {
         bail!("{} did not push after its pull", hello.name);
@@ -308,7 +303,6 @@ fn serve_connection(stream: TcpStream, store: &Path) -> Result<()> {
 
     transfer::refresh_derived(&memory, &received.changed)?;
     memory.mark_synced(hello.node)?;
-    memory.set_marks_sent_to(hello.node, &answered)?;
     log(&format!(
         "{} synced: received {}, {} in conflict",
         hello.name,
@@ -318,18 +312,16 @@ fn serve_connection(stream: TcpStream, store: &Path) -> Result<()> {
     Ok(())
 }
 
-fn gossip_for(memory: &Memory, peer: Id) -> Result<Gossip> {
+fn gossip_of(memory: &Memory) -> Result<Gossip> {
     Ok(Gossip {
         peers: memory.peer_cards()?,
         shared: memory.shared_values()?,
-        usage: memory.usage_marks_since(memory.marks_sent_to(peer)?.as_deref())?,
     })
 }
 
 fn hear(memory: &Memory, gossip: &Gossip) -> Result<()> {
     memory.hear_of(&gossip.peers)?;
-    memory.hear_shared(&gossip.shared)?;
-    memory.hear_usage(&gossip.usage)
+    memory.hear_shared(&gossip.shared)
 }
 
 fn admit(memory: &Memory, hello: &Hello, remote: IpAddr) -> Result<Message> {

@@ -371,38 +371,5 @@ mod tests {
         assert!(leads(&meshed, Reason::Scheduled).unwrap());
         assert_eq!(holder(&meshed), meshed.node().unwrap());
     }
-
-    #[test]
-    fn a_memory_used_on_any_machine_is_not_retired_for_disuse_here() {
-        use crate::memory::{Kind, NewMemory};
-        use crate::shared::UsageMark;
-
-        let memory = Memory::open_in_memory().unwrap();
-        let learn = |title: &str| {
-            memory
-                .add(&NewMemory {
-                    kind: Kind::Observation,
-                    entity: None,
-                    title: title.into(),
-                    body: "Body.".into(),
-                    links: vec![],
-                    source_session: None,
-                    class: Some("history".into()),
-                })
-                .unwrap()
-        };
-        let used_elsewhere = learn("Used on the laptop");
-        let unused = learn("Used nowhere");
-        memory
-            .hear_usage(&[UsageMark {
-                memory_id: used_elsewhere,
-                node: Id::parse("pppppppp").unwrap(),
-                last_delivered: "2026-09-01".into(),
-            }])
-            .unwrap();
-
-        let retirable: Vec<Id> = memory.unretrieved_observations().unwrap().iter().map(|it| it.id).collect();
-        assert_eq!(retirable, vec![unused]);
-    }
 }
 
