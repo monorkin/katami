@@ -11,7 +11,7 @@
 //! and an archived row is the backup.
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -28,6 +28,21 @@ use crate::paths;
 use crate::project;
 
 const CONSOLIDATE_AT: usize = 3;
+
+const LEASE_KEY: &str = "curator_lease";
+const LEASE_SECONDS: u64 = 3 * 86_400;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Reason {
+    Scheduled,
+    Asked,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Lease {
+    holder: Id,
+    until: String,
+}
 
 fn archive_skills_after_days() -> u64 {
     fsutil::read_json(&paths::data_dir().join("config.json"))
@@ -67,20 +82,29 @@ pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run(config_dir: &Path) -> Result<()> {
+/// Looking after this machine — its skills, embeddings, queue, conflicts, and
+/// files — is every machine's own job. Deciding things for the whole mesh,
+/// what to retire and what the cards say, is for whichever one leads.
+pub fn run(config_dir: &Path, reason: Reason) -> Result<()> {
     let Some(_lock) = flock::try_acquire(&paths::memory_dir().join("curator.lock"))? else {
         return Ok(());
     };
     let memory = Memory::open(&paths::memory_dir())?;
+    crate::mesh::sync_all_quietly();
+    let leading = leads(&memory, reason)?;
 
     archive_unused_skills(&memory)?;
-    archive_stale_statuses(&memory)?;
-    archive_never_retrieved(&memory)?;
+    if leading {
+        archive_stale_statuses(&memory)?;
+        archive_never_retrieved(&memory)?;
+    }
     rehome_aliased_memories(&memory)?;
     reembed_missing(&memory)?;
     crate::reviewer::drain(config_dir)?;
     crate::merger::run(config_dir)?;
-    consolidate_entities(&memory, config_dir)?;
+    if leading {
+        consolidate_entities(&memory, config_dir)?;
+    }
     cards::render_all(&memory, &paths::memory_dir().join("cards"))?;
     sweep_files(&memory)?;
 
@@ -88,6 +112,30 @@ pub fn run(config_dir: &Path) -> Result<()> {
     log("curated");
     crate::mesh::sync_all_quietly();
     Ok(())
+}
+
+/// One machine curates for the mesh at a time, or they'd each rewrite the same
+/// cards daily and spend their days merging one another's rewrites. The lease
+/// is a shared value that says who and until when. Its holder renews it on
+/// every run; when the holder has been away long enough for it to lapse, the
+/// next machine to curate takes it, so the job follows whoever is awake. A
+/// person asking for a curation gets one here and now, lease or not. Two
+/// machines that can't see each other may both lead for a while, which costs
+/// a few merges and nothing else.
+pub fn leads(memory: &Memory, reason: Reason) -> Result<bool> {
+    let me = memory.node()?;
+    let held_elsewhere = memory
+        .shared(LEASE_KEY)?
+        .and_then(|it| serde_json::from_str::<Lease>(&it).ok())
+        .is_some_and(|it| it.holder != me && it.until > clock::timestamp());
+
+    if held_elsewhere && reason == Reason::Scheduled && !memory.peers()?.is_empty() {
+        Ok(false)
+    } else {
+        let lease = Lease { holder: me, until: clock::timestamp_in(LEASE_SECONDS) };
+        memory.share(LEASE_KEY, &serde_json::to_string(&lease)?)?;
+        Ok(true)
+    }
 }
 
 /// A status snapshot nobody refreshed in two weeks is stale by definition —
@@ -273,4 +321,88 @@ Reply with ONLY this JSON, no prose:
 {"card_body":"the full updated card body in markdown","folded_ids":["k7m2p9xq","b3x0t8hd"]}
 
 folded_ids lists every observation id you fully absorbed into the card. Leave an id out only if the observation should stay standalone."#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::SharedValue;
+
+    fn lease_held_by(node: &str, until: &str) -> SharedValue {
+        SharedValue {
+            key: LEASE_KEY.into(),
+            value: format!(r#"{{"holder":"{node}","until":"{until}"}}"#),
+            updated: "2999-01-01T00:00:00Z".into(),
+            node: Id::parse(node).unwrap(),
+        }
+    }
+
+    fn holder(memory: &Memory) -> Id {
+        serde_json::from_str::<Lease>(&memory.shared(LEASE_KEY).unwrap().unwrap()).unwrap().holder
+    }
+
+    #[test]
+    fn the_lease_goes_to_whoever_is_awake_when_it_lapses() {
+        let memory = Memory::open_in_memory().unwrap();
+        let me = memory.node().unwrap();
+        memory.remember_peer(Id::parse("mmmmmmmm").unwrap(), "mini", "100.64.0.2:5282", None).unwrap();
+
+        assert!(leads(&memory, Reason::Scheduled).unwrap());
+        assert_eq!(holder(&memory), me);
+
+        memory.hear_shared(&[lease_held_by("mmmmmmmm", "2999-01-01T00:00:00Z")]).unwrap();
+        assert!(!leads(&memory, Reason::Scheduled).unwrap());
+        assert_eq!(holder(&memory), Id::parse("mmmmmmmm").unwrap());
+
+        assert!(leads(&memory, Reason::Asked).unwrap());
+        assert_eq!(holder(&memory), me);
+    }
+
+    #[test]
+    fn a_lapsed_lease_or_a_machine_with_no_peers_leads_itself() {
+        let alone = Memory::open_in_memory().unwrap();
+        alone.hear_shared(&[lease_held_by("mmmmmmmm", "2999-01-01T00:00:00Z")]).unwrap();
+        assert!(leads(&alone, Reason::Scheduled).unwrap());
+
+        let meshed = Memory::open_in_memory().unwrap();
+        meshed.remember_peer(Id::parse("mmmmmmmm").unwrap(), "mini", "100.64.0.2:5282", None).unwrap();
+        let mut lapsed = lease_held_by("mmmmmmmm", "2020-01-01T00:00:00Z");
+        lapsed.updated = "2020-01-01T00:00:00Z".into();
+        meshed.hear_shared(&[lapsed]).unwrap();
+        assert!(leads(&meshed, Reason::Scheduled).unwrap());
+        assert_eq!(holder(&meshed), meshed.node().unwrap());
+    }
+
+    #[test]
+    fn a_memory_used_on_any_machine_is_not_retired_for_disuse_here() {
+        use crate::memory::{Kind, NewMemory};
+        use crate::shared::UsageMark;
+
+        let memory = Memory::open_in_memory().unwrap();
+        let learn = |title: &str| {
+            memory
+                .add(&NewMemory {
+                    kind: Kind::Observation,
+                    entity: None,
+                    title: title.into(),
+                    body: "Body.".into(),
+                    links: vec![],
+                    source_session: None,
+                    class: Some("history".into()),
+                })
+                .unwrap()
+        };
+        let used_elsewhere = learn("Used on the laptop");
+        let unused = learn("Used nowhere");
+        memory
+            .hear_usage(&[UsageMark {
+                memory_id: used_elsewhere,
+                node: Id::parse("pppppppp").unwrap(),
+                last_delivered: "2026-09-01".into(),
+            }])
+            .unwrap();
+
+        let retirable: Vec<Id> = memory.unretrieved_observations().unwrap().iter().map(|it| it.id).collect();
+        assert_eq!(retirable, vec![unused]);
+    }
+}
 

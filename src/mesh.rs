@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::clock::timestamp;
 use crate::fsutil;
 use crate::id::Id;
 use crate::logs;
@@ -34,6 +35,7 @@ use crate::memory::Memory;
 use crate::paths;
 use crate::peers::{Peer, PeerCard};
 use crate::replica::{Delta, Knowledge, Tally};
+use crate::shared::{SharedValue, UsageMark};
 use crate::tailscale;
 use crate::transfer;
 
@@ -54,10 +56,19 @@ enum Message {
     Paired { node: Id, name: String, token: String },
     PairingPending,
     Refused { reason: String },
-    Pull { knowledge: Knowledge, peers: Vec<PeerCard> },
-    Delta { delta: Delta, peers: Vec<PeerCard> },
+    Pull { knowledge: Knowledge, gossip: Gossip },
+    Delta { delta: Delta, gossip: Gossip },
     Push { delta: Delta },
     Done,
+}
+
+/// What rides along with the memories: who's in the mesh, the little state it
+/// shares, and which memories got used since these two last spoke.
+#[derive(Serialize, Deserialize, Debug)]
+struct Gossip {
+    peers: Vec<PeerCard>,
+    shared: Vec<SharedValue>,
+    usage: Vec<UsageMark>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -187,11 +198,12 @@ pub fn sync_with(memory: &Memory, address: &str, token: Option<&str>, pairing_co
     };
     memory.remember_peer(peer, &name, &address.to_string(), granted.as_deref())?;
 
-    send(&mut writer, &Message::Pull { knowledge: memory.knowledge()?, peers: memory.peer_cards()? })?;
-    let Message::Delta { delta, peers } = receive(&mut reader)? else {
+    let asked = timestamp();
+    send(&mut writer, &Message::Pull { knowledge: memory.knowledge()?, gossip: gossip_for(memory, peer)? })?;
+    let Message::Delta { delta, gossip } = receive(&mut reader)? else {
         bail!("{name} did not answer the pull with a delta");
     };
-    memory.hear_of(&peers)?;
+    hear(memory, &gossip)?;
     let received = memory.absorb_delta(&delta)?;
 
     let ours = memory.delta_for(&delta.knowledge)?;
@@ -203,6 +215,7 @@ pub fn sync_with(memory: &Memory, address: &str, token: Option<&str>, pairing_co
 
     transfer::refresh_derived(memory, &received.changed)?;
     memory.mark_synced(peer)?;
+    memory.set_marks_sent_to(peer, &asked)?;
     Ok(Reply::Synced(Exchange { peer, name, received, sent }))
 }
 
@@ -280,11 +293,12 @@ fn serve_connection(stream: TcpStream, store: &Path) -> Result<()> {
     }
 
     let mut reader = BufReader::new(stream);
-    let Message::Pull { knowledge, peers } = receive(&mut reader)? else {
+    let Message::Pull { knowledge, gossip } = receive(&mut reader)? else {
         bail!("{} did not pull after its hello", hello.name);
     };
-    memory.hear_of(&peers)?;
-    send(&mut writer, &Message::Delta { delta: memory.delta_for(&knowledge)?, peers: memory.peer_cards()? })?;
+    hear(&memory, &gossip)?;
+    let answered = timestamp();
+    send(&mut writer, &Message::Delta { delta: memory.delta_for(&knowledge)?, gossip: gossip_for(&memory, hello.node)? })?;
 
     let Message::Push { delta } = receive(&mut reader)? else {
         bail!("{} did not push after its pull", hello.name);
@@ -294,6 +308,7 @@ fn serve_connection(stream: TcpStream, store: &Path) -> Result<()> {
 
     transfer::refresh_derived(&memory, &received.changed)?;
     memory.mark_synced(hello.node)?;
+    memory.set_marks_sent_to(hello.node, &answered)?;
     log(&format!(
         "{} synced: received {}, {} in conflict",
         hello.name,
@@ -301,6 +316,20 @@ fn serve_connection(stream: TcpStream, store: &Path) -> Result<()> {
         received.conflicted.len()
     ));
     Ok(())
+}
+
+fn gossip_for(memory: &Memory, peer: Id) -> Result<Gossip> {
+    Ok(Gossip {
+        peers: memory.peer_cards()?,
+        shared: memory.shared_values()?,
+        usage: memory.usage_marks_since(memory.marks_sent_to(peer)?.as_deref())?,
+    })
+}
+
+fn hear(memory: &Memory, gossip: &Gossip) -> Result<()> {
+    memory.hear_of(&gossip.peers)?;
+    memory.hear_shared(&gossip.shared)?;
+    memory.hear_usage(&gossip.usage)
 }
 
 fn admit(memory: &Memory, hello: &Hello, remote: IpAddr) -> Result<Message> {

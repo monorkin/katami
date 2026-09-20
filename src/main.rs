@@ -31,6 +31,7 @@ mod reranker;
 mod reviewer;
 mod search;
 mod setup;
+mod shared;
 mod supervisor;
 mod tailscale;
 mod transcript;
@@ -282,7 +283,7 @@ fn run(cli: Cli) -> Result<()> {
             RelaysCommand::Install => relays::install_command(),
             RelaysCommand::Status => relays::status_command(),
         },
-        Command::Curate { config_dir } => curator::run(&config_dir),
+        Command::Curate { config_dir } => curator::run(&config_dir, curator::Reason::Scheduled),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
         Command::Link { host, accept, remove, serve } => match (host, accept, remove, serve) {
             (Some(host), None, None, false) => link_cli::link(&host),
@@ -335,7 +336,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             MemoryCommand::Sync => link_cli::sync(),
             MemoryCommand::PullModels => embeddings::pull().and_then(|_| reranker::pull()),
-            MemoryCommand::Curate => curator::run(&paths::claude_config_home()),
+            MemoryCommand::Curate => curator::run(&paths::claude_config_home(), curator::Reason::Asked),
         },
         Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),

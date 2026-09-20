@@ -331,8 +331,25 @@ const MIGRATE_7_TO_8: &str = "
         token TEXT,
         removed INTEGER NOT NULL DEFAULT 0,
         updated TEXT NOT NULL,
-        last_synced TEXT
+        last_synced TEXT,
+        marks_sent TEXT
     );
+
+    CREATE TABLE shared_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated TEXT NOT NULL,
+        node TEXT NOT NULL
+    );
+
+    CREATE TABLE usage_marks (
+        memory_id TEXT NOT NULL,
+        node TEXT NOT NULL,
+        last_delivered TEXT NOT NULL,
+        learned TEXT NOT NULL,
+        PRIMARY KEY (memory_id, node)
+    );
+    CREATE INDEX usage_marks_by_learned ON usage_marks(learned);
 
     CREATE TABLE pairings (
         code TEXT PRIMARY KEY,
@@ -676,6 +693,10 @@ impl Memory {
                 dot_seq = local_row,
                 version = json_object((SELECT node FROM sync_clock), local_row);
             UPDATE sync_clock SET seq = COALESCE((SELECT MAX(local_row) FROM memories), 0);
+
+            INSERT INTO usage_marks (memory_id, node, last_delivered, learned)
+            SELECT memory_id, (SELECT node FROM sync_clock), substr(MAX(delivered_at), 1, 10), MAX(delivered_at)
+            FROM memory_deliveries GROUP BY memory_id;
             ",
         )?;
         self.connection.execute_batch(STAMP_TRIGGERS)?;
@@ -943,13 +964,16 @@ impl Memory {
         Ok(())
     }
 
+    /// The delivery log stays on this machine; that the memory got used at
+    /// all is marked for the mesh, since that's what keeps it from being
+    /// retired by a machine that never works on this project.
     pub fn record_delivery(&self, memory_id: Id, session_id: &str, event: &str, form: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![memory_id, session_id, event, form, timestamp()],
         )?;
-        Ok(())
+        self.mark_used(memory_id)
     }
 
     pub fn record_judgment(
@@ -1299,6 +1323,9 @@ impl Memory {
                AND (m.class IS NULL OR m.class IN ({retirable}))
                AND NOT EXISTS (
                  SELECT 1 FROM memory_deliveries d WHERE d.memory_id = m.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM usage_marks u WHERE u.memory_id = m.id
                )"
         ))?;
         let rows = statement.query_map([], row_to_stored)?;
