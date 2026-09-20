@@ -231,13 +231,24 @@ fn settle(
         OnCollision::Replace => Ok(Decision::Replace(id, arriving)),
         OnCollision::Merge => {
             println!("Merging {}…", existing.title);
-            let body = merged_body(&existing, &arriving, config_dir)?;
+            let body = merged_body(&existing, &arriving, config_dir).with_context(|| {
+                format!(
+                    "could not merge `{}` — rerun with --replace, or without a flag to keep the store's copy",
+                    existing.title
+                )
+            })?;
             Ok(Decision::Merge(id, merged(&existing, &arriving, &body)))
         }
     }
 }
 
-fn merged_body(existing: &Portable, arriving: &Portable, config_dir: &Path) -> Result<String> {
+/// One body out of two, written by haiku — unless the two already agree, in
+/// which case the disagreement is about something a model has no say in.
+pub fn merged_body(existing: &Portable, arriving: &Portable, config_dir: &Path) -> Result<String> {
+    if existing.body.trim() == arriving.body.trim() {
+        return Ok(existing.body.trim().to_string());
+    }
+
     let input = format!(
         "## Already in the store (updated {})\n\n{}\n\n## Arriving (updated {})\n\n{}\n",
         existing.updated,
@@ -251,16 +262,24 @@ fn merged_body(existing: &Portable, arriving: &Portable, config_dir: &Path) -> R
         } else {
             Ok(())
         }
-    })
-    .with_context(|| format!("could not merge `{}` — rerun with --replace, or without a flag to keep the store's copy", existing.title))?;
+    })?;
     Ok(reply.body.trim().to_string())
 }
 
 /// The store's copy keeps its identity — title, entity, creation date — and
 /// takes on the merged body. Whatever either side knew beyond the prose
 /// survives: every link, a pin from either, and it stays archived only if
-/// both had retired it.
+/// both had retired it. The one time the arriving entity wins is when it
+/// names the project by its remote and the store's still names it by a path,
+/// because only one of those means anything on another machine.
 pub fn merged(existing: &Portable, arriving: &Portable, body: &str) -> Portable {
+    let named_by_path = |it: &Option<String>| it.as_deref().is_some_and(|it| project::local_path(it).is_some());
+    let entity = if named_by_path(&existing.entity) && arriving.entity.is_some() && !named_by_path(&arriving.entity) {
+        arriving.entity.clone()
+    } else {
+        existing.entity.clone()
+    };
+
     let mut links = existing.links.clone();
     for link in arriving.links.iter().cloned().chain(cards::extract_links(body)) {
         if !links.contains(&link) {
@@ -273,6 +292,7 @@ pub fn merged(existing: &Portable, arriving: &Portable, body: &str) -> Portable 
 
     Portable {
         class: existing.class.clone().or_else(|| arriving.class.clone()),
+        entity,
         body: body.to_string(),
         links,
         pinned: existing.pinned || arriving.pinned,

@@ -17,6 +17,7 @@ mod log_cli;
 mod logs;
 mod memory;
 mod memory_cli;
+mod merger;
 mod mesh;
 mod models;
 mod overlay;

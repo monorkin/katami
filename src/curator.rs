@@ -79,6 +79,7 @@ pub fn run(config_dir: &Path) -> Result<()> {
     rehome_aliased_memories(&memory)?;
     reembed_missing(&memory)?;
     crate::reviewer::drain(config_dir)?;
+    crate::merger::run(config_dir)?;
     consolidate_entities(&memory, config_dir)?;
     cards::render_all(&memory, &paths::memory_dir().join("cards"))?;
     sweep_files(&memory)?;

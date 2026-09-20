@@ -191,6 +191,7 @@ fn spawn_detached(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Resu
 pub fn run(source: &Source, config_dir: &Path, cwd: Option<&Path>) -> Result<()> {
     enqueue(source, cwd)?;
     drain(config_dir)?;
+    crate::merger::run(config_dir)?;
     crate::mesh::sync_all_quietly();
     Ok(())
 }
