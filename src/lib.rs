@@ -1,0 +1,49 @@
+//! katami as a library: the memory, the supervisor, and everything between,
+//! for programs that build on it. The `katami` binary is a thin command line
+//! over this crate.
+
+pub mod bundle;
+pub mod cards;
+pub mod cli;
+pub mod clock;
+pub mod completions;
+pub mod curator;
+pub mod distiller;
+pub mod embeddings;
+pub mod flock;
+pub mod fsutil;
+pub mod hook_client;
+pub mod hook_protocol;
+pub mod id;
+pub mod launch;
+pub mod launches;
+pub mod link_cli;
+pub mod log_cli;
+pub mod logs;
+pub mod memory;
+pub mod memory_cli;
+pub mod merger;
+pub mod mesh;
+pub mod models;
+pub mod overlay;
+pub mod paths;
+pub mod peers;
+pub mod project;
+pub mod pty;
+pub mod relays;
+pub mod replica;
+pub mod reranker;
+pub mod reviewer;
+pub mod search;
+pub mod setup;
+pub mod shared;
+pub mod supervisor;
+pub mod tailscale;
+pub mod transcript;
+pub mod transcript_codex;
+pub mod transcript_opencode;
+pub mod transcript_pi;
+pub mod transfer;
+pub mod upgrade;
+pub mod version;
+pub mod virtual_skills;

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use usage::complete::Shell;
 use usage::install::{Env, Installed, Loading, OnForeign, Wrote};
 
-use crate::Cli;
+use crate::cli::Cli;
 
 pub fn print(shell: &str) -> Result<()> {
     print!("{}", Cli::completion_script(named_shell(shell)?));
