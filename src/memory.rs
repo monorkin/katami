@@ -256,6 +256,24 @@ pub struct GeneratedSkill {
     pub created: String,
 }
 
+/// A memory as it travels between stores: everything that is the memory
+/// itself, and nothing about how one store came by it or used it — ids,
+/// sessions, evidence, deliveries, and embeddings all stay behind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Portable {
+    pub kind: Kind,
+    pub class: Option<String>,
+    pub entity: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub links: Vec<String>,
+    pub pinned: bool,
+    pub archived: bool,
+    pub archive_reason: Option<String>,
+    pub created: String,
+    pub updated: String,
+}
+
 pub struct Stored {
     pub id: i64,
     pub kind: Kind,
@@ -810,6 +828,108 @@ impl Memory {
             )?;
         }
         Ok(())
+    }
+
+    pub fn ids(&self) -> Result<Vec<i64>> {
+        let mut statement = self.connection.prepare("SELECT id FROM memories ORDER BY id")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn portable(&self, id: i64) -> Result<Portable> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT to_title FROM links WHERE from_id = ?1 ORDER BY to_title")?;
+        let links = statement
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+
+        self.connection
+            .query_row(
+                "SELECT kind, class, entity, title, body, pinned, archived, archive_reason, created, updated
+                 FROM memories WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(Portable {
+                        kind: row.get(0)?,
+                        class: row.get(1)?,
+                        entity: row.get(2)?,
+                        title: row.get(3)?,
+                        body: row.get(4)?,
+                        links,
+                        pinned: row.get(5)?,
+                        archived: row.get(6)?,
+                        archive_reason: row.get(7)?,
+                        created: row.get(8)?,
+                        updated: row.get(9)?,
+                    })
+                },
+            )
+            .with_context(|| format!("no memory with id {id} — see `katami memory list`"))
+    }
+
+    /// The memories already here that an arriving one could be another copy
+    /// of, live ones first. Cards and statuses are one per entity whatever
+    /// they're titled; observations are the same memory when title and entity
+    /// both match. There can be several — superseded versions stay behind as
+    /// archived rows.
+    pub fn twins_of(&self, portable: &Portable) -> Result<Vec<i64>> {
+        let (title_matters, title) = match portable.kind {
+            Kind::Observation => (true, portable.title.as_str()),
+            Kind::Card | Kind::Status => (false, ""),
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM memories
+             WHERE kind = ?1 AND entity IS ?2 AND (?3 = 0 OR title = ?4)
+             ORDER BY archived, id",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![portable.kind.as_str(), portable.entity, title_matters, title],
+            |row| row.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn import(&self, portable: &Portable) -> Result<i64> {
+        self.connection.execute(
+            "INSERT INTO memories
+                (kind, class, entity, title, body, pinned, archived, archive_reason, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                portable.kind.as_str(),
+                portable.class,
+                portable.entity,
+                portable.title,
+                portable.body,
+                portable.pinned,
+                portable.archived,
+                portable.archive_reason,
+                portable.created,
+                portable.updated,
+            ],
+        )?;
+        let id = self.connection.last_insert_rowid();
+        self.replace_links(id, &portable.links)?;
+        Ok(id)
+    }
+
+    pub fn overwrite(&self, id: i64, portable: &Portable) -> Result<()> {
+        self.connection.execute(
+            "UPDATE memories SET class = ?2, title = ?3, body = ?4, pinned = ?5, archived = ?6,
+                                 archive_reason = ?7, updated = ?8
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                portable.class,
+                portable.title,
+                portable.body,
+                portable.pinned,
+                portable.archived,
+                portable.archive_reason,
+                portable.updated,
+            ],
+        )?;
+        self.replace_links(id, &portable.links)
     }
 
     pub fn unembedded(&self, model: &str) -> Result<Vec<(i64, String)>> {

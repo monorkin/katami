@@ -51,6 +51,12 @@ Relays and codex hooks also write into real config — sandbox those too with
   filters katami's own injected context so the store never eats its output.
 - **`curator.rs`** consolidates observations into cards and retires unused
   skills, at most once a day.
+- **`transfer.rs`** is `memory export`/`import`; **`bundle.rs`** is the format
+  (a zip of markdown files with flat `key: value` frontmatter, no YAML crate).
+  `memory::Portable` is what travels. Import decides everything first —
+  including `--merge`'s haiku calls through `distiller.rs` — then applies it
+  in one transaction. An identical twin anywhere means unchanged, and an
+  archived arrival is added as history rather than contesting a live memory.
 
 ## Style
 

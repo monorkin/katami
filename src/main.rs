@@ -1,3 +1,4 @@
+mod bundle;
 mod cards;
 mod clock;
 mod completions;
@@ -28,6 +29,7 @@ mod transcript;
 mod transcript_codex;
 mod transcript_opencode;
 mod transcript_pi;
+mod transfer;
 mod upgrade;
 mod virtual_skills;
 
@@ -162,6 +164,23 @@ enum MemoryCommand {
         #[usage(long)]
         sort_by: Option<String>,
     },
+    /// Write memories to a zip of markdown files: `all`, an id, or ids separated by commas
+    Export {
+        selection: String,
+        /// Where to write the zip; defaults to katami-memories-<date>.zip here
+        #[usage(long)]
+        to: Option<PathBuf>,
+    },
+    /// Read memories from an exported zip; ones already here are kept and reported
+    Import {
+        path: PathBuf,
+        /// Let the bundle's copy win when a memory is already here
+        #[usage(long)]
+        replace: bool,
+        /// Have haiku write one memory out of the two when a memory is already here
+        #[usage(long)]
+        merge: bool,
+    },
     /// Download the models that power semantic search and relevance judging
     PullModels,
     /// Consolidate observations into cards and archive unused skills now
@@ -269,6 +288,16 @@ fn run(cli: Cli) -> Result<()> {
                     memory::ListFilter::Active
                 };
                 memory_cli::list(filter, kinds.as_deref(), sort_by.as_deref())
+            }
+            MemoryCommand::Export { selection, to } => transfer::export(&selection, to),
+            MemoryCommand::Import { path, replace, merge } => {
+                let on_collision = match (replace, merge) {
+                    (true, true) => anyhow::bail!("--replace and --merge settle collisions differently — pick one"),
+                    (true, false) => transfer::OnCollision::Replace,
+                    (false, true) => transfer::OnCollision::Merge,
+                    (false, false) => transfer::OnCollision::Skip,
+                };
+                transfer::import(&path, on_collision, &paths::claude_config_home())
             }
             MemoryCommand::PullModels => embeddings::pull().and_then(|_| reranker::pull()),
             MemoryCommand::Curate => curator::run(&paths::claude_config_home()),

@@ -61,6 +61,12 @@ katami memory add "Title" "The fact." --entity project:/path
 katami memory pull-models                 # enable semantic search and relevance judging (~120MB, once)
 katami memory curate                      # consolidate and retire now
 
+katami memory export all                  # every memory → katami-memories-<date>.zip
+katami memory export 12,45 --to ~/pair.zip   # or one id, or a few
+katami memory import ~/pair.zip           # memories already here are kept and reported
+katami memory import ~/pair.zip --replace # …or the zip's copy wins
+katami memory import ~/pair.zip --merge   # …or haiku writes one memory out of the two
+
 katami log -f                             # watch what the supervisor is doing
 katami relays install                     # (re)install the codex/pi/opencode relays
 katami relays status                      # show each relay's state
@@ -127,6 +133,14 @@ Two tool-specific notes:
   `katami-<name>` entries in the claude config dir's `skills/` before each
   launch, and their usage is tracked through the PostToolUse hook to inform
   curation. A skills dir that's a symlink to shared territory is left alone.
+- **Export and import.** A bundle is a zip with one markdown file per memory:
+  kind, class, entity, links, pin and archive state, and dates in a
+  frontmatter block, then `# Title` and the body. Unzip it, fix what needs
+  fixing — a project path that differs on the other machine, say — zip it
+  back up, and import. Only the memory itself travels: ids, embeddings,
+  evidence, and delivery history stay behind, and embeddings are rebuilt on
+  arrival. A bundle lands in one transaction or not at all, and importing the
+  same one twice changes nothing.
 
 ## Building
 

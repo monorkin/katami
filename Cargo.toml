@@ -22,3 +22,4 @@ candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 # candle-core already builds this tokenizers with onig, so the reranker shares it
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
