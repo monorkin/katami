@@ -59,6 +59,54 @@ pub fn supervise(mut command: Command, launch_key: String) -> Result<i32> {
     Ok(crate::launch::exit_code(&status))
 }
 
+/// Supervising without a terminal — `claude -p` in a script, or under a
+/// program that runs sessions for itself. There is no byte stream to splice,
+/// so the child keeps the stdio it was given; everything else is the same:
+/// hooks reach the server, prompts get memories, and every session seen is
+/// reviewed when the child exits.
+pub fn supervise_headless(mut command: Command, program: &str, launch_key: String) -> Result<i32> {
+    let server = HookServer::start(launch_key)?;
+    command.env(hook_protocol::SOCKET_ENV_VAR, &server.socket_path);
+
+    let status = command
+        .status()
+        .with_context(|| format!("could not launch {program} — is it on your PATH?"))?;
+    review_seen_sessions(&server.context);
+    drop(server);
+    Ok(crate::launch::exit_code(&status))
+}
+
+/// Supervision for a program that runs claude sessions itself and wants them
+/// to remember: begin, cover each command before spawning it, finish once the
+/// sessions are over. The hooks the overlay registers call the running
+/// executable as `<exe> hook …`, and reviews re-run it as `<exe> review …`,
+/// so the embedding program has to hand those commands to `cli::run`.
+pub struct Supervision {
+    server: HookServer,
+    overlay: PathBuf,
+}
+
+impl Supervision {
+    pub fn begin(directory: &Path, label: &str) -> Result<Supervision> {
+        Ok(Supervision {
+            server: HookServer::start(launches::key(directory, label))?,
+            overlay: crate::overlay::write(None)?,
+        })
+    }
+
+    pub fn cover(&self, command: &mut Command) {
+        command
+            .env(hook_protocol::SOCKET_ENV_VAR, &self.server.socket_path)
+            .arg("--settings")
+            .arg(&self.overlay);
+    }
+
+    pub fn finish(self) {
+        review_seen_sessions(&self.server.context);
+        crate::overlay::remove(&self.overlay);
+    }
+}
+
 fn review_seen_sessions(context: &ServerContext) {
     let sessions = context.sessions.lock().unwrap();
     for seen in sessions.values() {

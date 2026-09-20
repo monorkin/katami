@@ -44,7 +44,7 @@ pub fn run(command: &[String]) -> Result<()> {
     }
 
     let composed = compose(&command[0], &args)?;
-    let code = supervise_or_pipe(composed, &command[0], launch_key);
+    let code = supervise(composed, &command[0], launch_key);
 
     if let Some(path) = &overlay_path {
         overlay::remove(path);
@@ -72,18 +72,11 @@ fn reveal_tool_to_herdr(command: &[String]) -> Result<()> {
     Err(error).context("could not relaunch katami with the herdr agent hint")
 }
 
-fn supervise_or_pipe(mut command: Command, program: &str, launch_key: String) -> Result<i32> {
+fn supervise(command: Command, program: &str, launch_key: String) -> Result<i32> {
     if pty::is_terminal(libc::STDIN_FILENO) && pty::is_terminal(libc::STDOUT_FILENO) {
         supervisor::supervise(command, launch_key)
     } else {
-        // No supervisor here, so an inherited socket from an outer supervised
-        // session must not leak in — the inner session's hooks would relay to
-        // the wrong server
-        command.env_remove(crate::hook_protocol::SOCKET_ENV_VAR);
-        let status = command
-            .status()
-            .with_context(|| format!("could not launch {program} — is it on your PATH?"))?;
-        Ok(exit_code(&status))
+        supervisor::supervise_headless(command, program, launch_key)
     }
 }
 
