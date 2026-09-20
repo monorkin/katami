@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::clock::timestamp;
@@ -44,7 +45,8 @@ pub const CLASSES: [&str; 7] = [
 
 pub const RETIRABLE_CLASSES: [&str; 2] = ["history", "reference"];
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Observation,
     Card,
@@ -230,7 +232,7 @@ const MEMORY_TABLES: &str = "
         INSERT INTO memories_fts(memories_fts, rowid, title, body, entity)
         VALUES ('delete', old.local_row, old.title, old.body, old.entity);
     END;
-    CREATE TRIGGER memories_update AFTER UPDATE ON memories BEGIN
+    CREATE TRIGGER memories_update AFTER UPDATE OF title, body, entity ON memories BEGIN
         INSERT INTO memories_fts(memories_fts, rowid, title, body, entity)
         VALUES ('delete', old.local_row, old.title, old.body, old.entity);
         INSERT INTO memories_fts(rowid, title, body, entity)
@@ -276,6 +278,90 @@ const MEMORY_TABLES: &str = "
         logit REAL NOT NULL,
         judged_at TEXT NOT NULL
     );
+";
+
+/// v8 is what lets stores on different machines share memories without one
+/// of them being in charge.
+///
+/// Every write gets a dot — this store's node id and the next tick of its
+/// clock — and folds that dot into the row's version vector. Comparing two
+/// vectors says whether one version grew out of the other or whether two
+/// machines changed the same memory at once. The stamping lives in triggers,
+/// not in the methods that write, so no write path can forget it; a write
+/// that arrives from a peer carries its own dot, and the triggers leave any
+/// row whose dot changed alone.
+///
+/// `sync_knowledge` is how far this store has caught up with each node,
+/// `memory_siblings` holds versions that conflict with the local one until
+/// they're merged, and `merged_from` marks a version as a merge of two
+/// others so that two machines merging the same pair don't then have to
+/// merge their merges. A link is part of its memory, so changing one touches
+/// the memory and stamps it.
+const MIGRATE_7_TO_8: &str = "
+    ALTER TABLE memories ADD COLUMN dot_node TEXT;
+    ALTER TABLE memories ADD COLUMN dot_seq INTEGER;
+    ALTER TABLE memories ADD COLUMN version TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE memories ADD COLUMN merged_from TEXT;
+    CREATE INDEX memories_by_dot ON memories(dot_node, dot_seq);
+
+    CREATE TABLE sync_clock (
+        node TEXT NOT NULL,
+        seq INTEGER NOT NULL
+    );
+
+    CREATE TABLE sync_knowledge (
+        node TEXT PRIMARY KEY,
+        seq INTEGER NOT NULL
+    );
+
+    CREATE TABLE memory_siblings (
+        memory_id TEXT NOT NULL,
+        dot_node TEXT NOT NULL,
+        dot_seq INTEGER NOT NULL,
+        record TEXT NOT NULL,
+        received TEXT NOT NULL,
+        PRIMARY KEY (memory_id, dot_node, dot_seq)
+    );
+
+    CREATE TABLE peers (
+        node TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        address TEXT NOT NULL,
+        token TEXT,
+        updated TEXT NOT NULL,
+        last_synced TEXT
+    );
+";
+
+const STAMP_TRIGGERS: &str = "
+    CREATE TRIGGER memories_stamp_insert AFTER INSERT ON memories
+    WHEN new.dot_node IS NULL BEGIN
+        UPDATE sync_clock SET seq = seq + 1;
+        UPDATE memories
+        SET dot_node = (SELECT node FROM sync_clock),
+            dot_seq = (SELECT seq FROM sync_clock),
+            version = json_set(new.version, '$.' || (SELECT node FROM sync_clock), (SELECT seq FROM sync_clock))
+        WHERE local_row = new.local_row;
+    END;
+
+    CREATE TRIGGER memories_stamp_update AFTER UPDATE ON memories
+    WHEN new.dot_node IS old.dot_node AND new.dot_seq IS old.dot_seq BEGIN
+        UPDATE sync_clock SET seq = seq + 1;
+        UPDATE memories
+        SET dot_node = (SELECT node FROM sync_clock),
+            dot_seq = (SELECT seq FROM sync_clock),
+            version = json_set(new.version, '$.' || (SELECT node FROM sync_clock), (SELECT seq FROM sync_clock)),
+            merged_from = CASE WHEN new.merged_from IS old.merged_from THEN NULL ELSE new.merged_from END
+        WHERE local_row = new.local_row;
+    END;
+
+    CREATE TRIGGER links_stamp_insert AFTER INSERT ON links BEGIN
+        UPDATE memories SET updated = updated WHERE id = new.from_id;
+    END;
+
+    CREATE TRIGGER links_stamp_delete AFTER DELETE ON links BEGIN
+        UPDATE memories SET updated = updated WHERE id = old.from_id;
+    END;
 ";
 
 pub struct NewReviewChunk {
@@ -354,7 +440,7 @@ pub struct GeneratedSkill {
 /// itself, under the id it has everywhere, and nothing about how one store
 /// came by it or used it — sessions, evidence, deliveries, and embeddings all
 /// stay behind.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Portable {
     pub id: Id,
     pub kind: Kind,
@@ -368,6 +454,20 @@ pub struct Portable {
     pub archive_reason: Option<String>,
     pub created: String,
     pub updated: String,
+}
+
+impl Portable {
+    /// Whether two copies are the same memory in every way a person would
+    /// notice — which id it has and when it was written aside.
+    pub fn says_the_same_as(&self, other: &Portable) -> bool {
+        let timeless = |it: &Portable| Portable {
+            id: self.id,
+            created: String::new(),
+            updated: String::new(),
+            ..it.clone()
+        };
+        timeless(self) == timeless(other)
+    }
 }
 
 pub struct Stored {
@@ -411,9 +511,11 @@ impl Memory {
         // open a brand-new store at the same moment
         // Steps run in order and each re-reads the version, so a store at any
         // age walks the whole chain in one open.
+        // A new store is created at v7 and walks the rest of the chain like
+        // any other, so later steps are written once, not once per path.
         self.with_transaction(|memory| {
             if memory.schema_version()? == 0 {
-                return memory.create_schema();
+                memory.create_schema()?;
             }
             if memory.schema_version()? == 1 {
                 // The table held reviewer state from day one — the old name lied
@@ -435,6 +537,9 @@ impl Memory {
             }
             if memory.schema_version()? == 6 {
                 memory.migrate_to_global_ids()?;
+            }
+            if memory.schema_version()? == 7 {
+                memory.migrate_to_stamped_writes()?;
             }
             Ok(())
         })
@@ -535,6 +640,28 @@ impl Memory {
             PRAGMA user_version = 7;
             ",
         )?;
+        Ok(())
+    }
+
+    /// Every memory already here becomes this node's write, stamped in the
+    /// order it was learned, before the triggers take over.
+    fn migrate_to_stamped_writes(&self) -> Result<()> {
+        self.connection.execute_batch(MIGRATE_7_TO_8)?;
+        self.connection.execute(
+            "INSERT INTO sync_clock (node, seq) VALUES (?1, 0)",
+            [Id::generate()],
+        )?;
+        self.connection.execute_batch(
+            "
+            UPDATE memories
+            SET dot_node = (SELECT node FROM sync_clock),
+                dot_seq = local_row,
+                version = json_object((SELECT node FROM sync_clock), local_row);
+            UPDATE sync_clock SET seq = COALESCE((SELECT MAX(local_row) FROM memories), 0);
+            ",
+        )?;
+        self.connection.execute_batch(STAMP_TRIGGERS)?;
+        self.connection.execute_batch("PRAGMA user_version = 8;")?;
         Ok(())
     }
 
@@ -1110,7 +1237,7 @@ impl Memory {
     pub fn overwrite(&self, id: Id, portable: &Portable) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET class = ?2, title = ?3, body = ?4, pinned = ?5, archived = ?6,
-                                 archive_reason = ?7, updated = ?8
+                                 archive_reason = ?7, updated = ?8, entity = ?9
              WHERE id = ?1",
             rusqlite::params![
                 id,
@@ -1121,6 +1248,7 @@ impl Memory {
                 portable.archived,
                 portable.archive_reason,
                 portable.updated,
+                portable.entity,
             ],
         )?;
         self.replace_links(id, &portable.links)

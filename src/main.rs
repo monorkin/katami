@@ -22,6 +22,7 @@ mod paths;
 mod project;
 mod pty;
 mod relays;
+mod replica;
 mod reranker;
 mod reviewer;
 mod search;
@@ -33,6 +34,7 @@ mod transcript_opencode;
 mod transcript_pi;
 mod transfer;
 mod upgrade;
+mod version;
 mod virtual_skills;
 
 use anyhow::Result;

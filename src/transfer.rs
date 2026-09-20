@@ -167,7 +167,7 @@ pub fn import_into(
 fn decide(memory: &Memory, arriving: Portable, on_collision: OnCollision, config_dir: &Path) -> Result<Decision> {
     if memory.exists(arriving.id)? {
         let existing = memory.portable(arriving.id)?;
-        if same_memory(&existing, &arriving) {
+        if existing.says_the_same_as(&arriving) {
             Ok(Decision::Unchanged)
         } else {
             settle(arriving.id, existing, arriving, on_collision, config_dir)
@@ -191,7 +191,7 @@ fn decide_among_twins(
         .map(|id| Ok((id, memory.portable(id)?)))
         .collect::<Result<Vec<_>>>()?;
 
-    if twins.iter().any(|(_, existing)| same_memory(existing, &arriving)) {
+    if twins.iter().any(|(_, existing)| existing.says_the_same_as(&arriving)) {
         Ok(Decision::Unchanged)
     } else if arriving.archived {
         // A retired memory is history to keep, never a rival to a live one
@@ -219,16 +219,6 @@ fn settle(
             Ok(Decision::Merge(id, merged(&existing, &arriving, &body)))
         }
     }
-}
-
-fn same_memory(existing: &Portable, arriving: &Portable) -> bool {
-    let timeless = |it: &Portable| Portable {
-        id: existing.id,
-        created: String::new(),
-        updated: String::new(),
-        ..it.clone()
-    };
-    timeless(existing) == timeless(arriving)
 }
 
 fn merged_body(existing: &Portable, arriving: &Portable, config_dir: &Path) -> Result<String> {
