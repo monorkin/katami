@@ -21,6 +21,7 @@ use crate::distiller;
 use crate::embeddings;
 use crate::flock;
 use crate::fsutil;
+use crate::id::Id;
 use crate::logs;
 use crate::memory::{Kind, Memory, NewMemory};
 use crate::paths;
@@ -196,7 +197,7 @@ fn consolidate_entities(memory: &Memory, config_dir: &Path) -> Result<()> {
 #[derive(Deserialize)]
 struct Consolidation {
     card_body: String,
-    folded_ids: Vec<i64>,
+    folded_ids: Vec<Id>,
 }
 
 fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
@@ -215,7 +216,7 @@ fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
         ));
     }
 
-    let valid_ids: Vec<i64> = observations.iter().map(|it| it.id).collect();
+    let valid_ids: Vec<Id> =observations.iter().map(|it| it.id).collect();
     let consolidation: Consolidation =
         distiller::ask(CONSOLIDATE_PROMPT, &input, config_dir, |consolidation: &Consolidation| {
             if let Some(id) = consolidation.folded_ids.iter().find(|it| !valid_ids.contains(it)) {
@@ -232,7 +233,7 @@ fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
 fn apply(
     memory: &Memory,
     entity: &str,
-    card_id: Option<i64>,
+    card_id: Option<Id>,
     consolidation: &Consolidation,
 ) -> Result<()> {
     let id = match card_id {
@@ -262,12 +263,12 @@ fn log(message: &str) {
     logs::append("curator", message);
 }
 
-const CONSOLIDATE_PROMPT: &str = r#"You maintain one entity card in a memory system. Stdin has the card's current body (possibly absent) and a list of dated observations about the same entity, each tagged [id N].
+const CONSOLIDATE_PROMPT: &str = r#"You maintain one entity card in a memory system. Stdin has the card's current body (possibly absent) and a list of dated observations about the same entity, each tagged with its id, like [id k7m2p9xq].
 
 Fold the observations into the card: merge duplicates, keep the newest version of contradicting facts, organize under these markdown sections — Identity, Preferences, History. Cards hold only durable material (they can be injected into any session); leave in-flight work status out entirely. Keep it tight; drop nothing that still matters, keep [[links]] that appear.
 
 Reply with ONLY this JSON, no prose:
-{"card_body":"the full updated card body in markdown","folded_ids":[1,2]}
+{"card_body":"the full updated card body in markdown","folded_ids":["k7m2p9xq","b3x0t8hd"]}
 
 folded_ids lists every observation id you fully absorbed into the card. Leave an id out only if the observation should stay standalone."#;
 

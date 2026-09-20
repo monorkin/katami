@@ -11,6 +11,7 @@ use anyhow::Result;
 use model2vec_rs::model::StaticModel;
 use std::sync::OnceLock;
 
+use crate::id::Id;
 use crate::memory::Memory;
 use crate::models::PinnedModel;
 
@@ -52,7 +53,7 @@ pub fn embed(text: &str) -> Option<Vec<f32>> {
     model.as_ref().map(|it| it.encode_single(text))
 }
 
-pub fn embed_into(memory: &Memory, id: i64, text: &str) -> Result<()> {
+pub fn embed_into(memory: &Memory, id: Id, text: &str) -> Result<()> {
     if let Some(vector) = embed(text) {
         memory.set_embedding(id, MODEL_NAME, &vector)?;
     }

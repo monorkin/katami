@@ -21,6 +21,7 @@ use crate::cards;
 use crate::clock::timestamp;
 use crate::distiller;
 use crate::embeddings;
+use crate::id::Id;
 use crate::memory::{Kind, Memory, Portable};
 use crate::paths;
 use crate::project;
@@ -28,19 +29,19 @@ use crate::project;
 #[derive(Debug, PartialEq)]
 pub enum Selection {
     All,
-    Ids(Vec<i64>),
+    Ids(Vec<Id>),
 }
 
 impl Selection {
-    pub fn parse(text: &str) -> Result<Selection> {
+    pub fn parse(memory: &Memory, text: &str) -> Result<Selection> {
         if text == "all" {
             Ok(Selection::All)
         } else {
             text.split(',')
                 .map(|it| {
-                    it.trim().parse::<i64>().with_context(|| {
-                        format!("`{it}` is not a memory id — export takes `all`, an id, or ids separated by commas")
-                    })
+                    memory
+                        .resolve(it.trim())
+                        .context("export takes `all`, an id, or ids separated by commas")
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Selection::Ids)
@@ -57,17 +58,17 @@ pub enum OnCollision {
 
 #[derive(Default, Debug)]
 pub struct Outcome {
-    pub added: Vec<i64>,
-    pub replaced: Vec<i64>,
-    pub merged: Vec<i64>,
+    pub added: Vec<Id>,
+    pub replaced: Vec<Id>,
+    pub merged: Vec<Id>,
     pub skipped: Vec<String>,
     pub unchanged: usize,
 }
 
 enum Decision {
     Add(Portable),
-    Replace(i64, Portable),
-    Merge(i64, Portable),
+    Replace(Id, Portable),
+    Merge(Id, Portable),
     Skip(String),
     Unchanged,
 }
@@ -86,7 +87,7 @@ Reply with ONLY this JSON, no prose:
 
 pub fn export(selection: &str, to: Option<PathBuf>) -> Result<()> {
     let memory = Memory::open(&paths::memory_dir())?;
-    let ids = match Selection::parse(selection)? {
+    let ids = match Selection::parse(&memory, selection)? {
         Selection::All => memory.ids()?,
         Selection::Ids(ids) => ids,
     };
@@ -96,7 +97,7 @@ pub fn export(selection: &str, to: Option<PathBuf>) -> Result<()> {
 
     let memories = ids
         .iter()
-        .map(|id| Ok((*id, memory.portable(*id)?)))
+        .map(|id| memory.portable(*id))
         .collect::<Result<Vec<_>>>()?;
     let path = destination(to);
     bundle::write(&path, &memories)?;
@@ -164,6 +165,26 @@ pub fn import_into(
 }
 
 fn decide(memory: &Memory, arriving: Portable, on_collision: OnCollision, config_dir: &Path) -> Result<Decision> {
+    if memory.exists(arriving.id)? {
+        let existing = memory.portable(arriving.id)?;
+        if same_memory(&existing, &arriving) {
+            Ok(Decision::Unchanged)
+        } else {
+            settle(arriving.id, existing, arriving, on_collision, config_dir)
+        }
+    } else {
+        decide_among_twins(memory, arriving, on_collision, config_dir)
+    }
+}
+
+/// An id this store has never seen can still be a memory it has: the bundle
+/// was written by hand, or the other store learned the same thing separately.
+fn decide_among_twins(
+    memory: &Memory,
+    arriving: Portable,
+    on_collision: OnCollision,
+    config_dir: &Path,
+) -> Result<Decision> {
     let twins = memory
         .twins_of(&arriving)?
         .into_iter()
@@ -183,7 +204,7 @@ fn decide(memory: &Memory, arriving: Portable, on_collision: OnCollision, config
 }
 
 fn settle(
-    id: i64,
+    id: Id,
     existing: Portable,
     arriving: Portable,
     on_collision: OnCollision,
@@ -202,6 +223,7 @@ fn settle(
 
 fn same_memory(existing: &Portable, arriving: &Portable) -> bool {
     let timeless = |it: &Portable| Portable {
+        id: existing.id,
         created: String::new(),
         updated: String::new(),
         ..it.clone()
@@ -297,6 +319,7 @@ mod tests {
 
     fn observation(title: &str, body: &str) -> Portable {
         Portable {
+            id: Id::generate(),
             kind: Kind::Observation,
             class: Some("preference".into()),
             entity: None,
@@ -326,11 +349,18 @@ mod tests {
 
     #[test]
     fn selections_are_all_an_id_or_a_list() {
-        assert_eq!(Selection::parse("all").unwrap(), Selection::All);
-        assert_eq!(Selection::parse("12").unwrap(), Selection::Ids(vec![12]));
-        assert_eq!(Selection::parse("3, 45,7").unwrap(), Selection::Ids(vec![3, 45, 7]));
-        assert!(Selection::parse("everything").is_err());
-        assert!(Selection::parse("3,,7").is_err());
+        let memory = Memory::open_in_memory().unwrap();
+        let rebase = memory.import(&observation("Prefers rebase", "Rebase.")).unwrap();
+        let squash = memory.import(&observation("Squashes fixups", "Squash.")).unwrap();
+
+        assert_eq!(Selection::parse(&memory, "all").unwrap(), Selection::All);
+        assert_eq!(Selection::parse(&memory, rebase.as_str()).unwrap(), Selection::Ids(vec![rebase]));
+        assert_eq!(
+            Selection::parse(&memory, &format!("{squash}, {rebase}")).unwrap(),
+            Selection::Ids(vec![squash, rebase])
+        );
+        assert!(Selection::parse(&memory, "everything").is_err());
+        assert!(Selection::parse(&memory, &format!("{rebase},,{squash}")).is_err());
     }
 
     #[test]

@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 
+use crate::id::Id;
 use crate::memory::{Memory, Stored};
 
 const CONTEXT_BUDGET_CHARS: usize = 4000;
@@ -20,14 +21,14 @@ const CANDIDATES: usize = 15;
 const RELEVANCE_FLOOR: f32 = -4.0;
 
 pub struct Hit {
-    pub id: i64,
+    pub id: Id,
     pub score: f64,
 }
 
 /// One candidate as the reranker saw it, relevant or not — the rejected ones
 /// are the negatives a fine-tuned judge will need.
 pub struct Judgment {
-    pub memory_id: i64,
+    pub memory_id: Id,
     pub logit: f32,
 }
 
@@ -45,8 +46,8 @@ pub fn bm25(memory: &Memory, query: &str, limit: usize) -> Result<Vec<Hit>> {
     // belong in their own project's SessionStart, never riding a keyword into
     // an unrelated conversation
     let mut statement = memory.connection.prepare(
-        "SELECT f.rowid, bm25(memories_fts) FROM memories_fts f
-         JOIN memories m ON m.id = f.rowid
+        "SELECT m.id, bm25(memories_fts) FROM memories_fts f
+         JOIN memories m ON m.local_row = f.rowid
          WHERE memories_fts MATCH ?1 AND m.archived = 0 AND m.kind != 'status'
          ORDER BY bm25(memories_fts) LIMIT ?2",
     )?;
@@ -123,7 +124,7 @@ pub fn vector(memory: &Memory, query: &[f32], limit: usize) -> Result<Vec<Hit>> 
 }
 
 pub fn fuse(rankings: &[Vec<Hit>], limit: usize) -> Vec<Hit> {
-    let mut scores: Vec<(i64, f64)> = Vec::new();
+    let mut scores: Vec<(Id, f64)> = Vec::new();
     for ranking in rankings {
         for (rank, hit) in ranking.iter().enumerate() {
             let contribution = 1.0 / (60.0 + rank as f64 + 1.0);
@@ -181,8 +182,8 @@ fn sanitize(query: &str) -> Option<String> {
 /// budget, not what was merely ranked.
 pub struct ComposedContext {
     pub text: String,
-    pub full_ids: Vec<i64>,
-    pub pointer_ids: Vec<i64>,
+    pub full_ids: Vec<Id>,
+    pub pointer_ids: Vec<Id>,
 }
 
 pub fn compose_context(memory: &Memory, hits: &[Hit]) -> Result<Option<ComposedContext>> {
@@ -192,7 +193,7 @@ pub fn compose_context(memory: &Memory, hits: &[Hit]) -> Result<Option<ComposedC
 
     let mut text = String::from("Relevant memories:\n");
     let mut full_ids = Vec::new();
-    let mut pointers: Vec<(i64, String)> = Vec::new();
+    let mut pointers: Vec<(Id, String)> = Vec::new();
     let body_budget = CONTEXT_BUDGET_CHARS * 3 / 4;
 
     for hit in hits {
@@ -303,31 +304,34 @@ mod tests {
 
     #[test]
     fn fusion_prefers_agreement_over_a_single_top_rank() {
-        let lexical = vec![Hit { id: 1, score: 9.0 }, Hit { id: 2, score: 5.0 }];
-        let semantic = vec![Hit { id: 2, score: 0.9 }, Hit { id: 3, score: 0.8 }];
+        let [first, second, third] = ["aaaaaaa1", "aaaaaaa2", "aaaaaaa3"].map(|it| Id::parse(it).unwrap());
+        let lexical = vec![Hit { id: first, score: 9.0 }, Hit { id: second, score: 5.0 }];
+        let semantic = vec![Hit { id: second, score: 0.9 }, Hit { id: third, score: 0.8 }];
 
         let fused = fuse(&[lexical, semantic], 3);
-        assert_eq!(fused[0].id, 2);
+        assert_eq!(fused[0].id, second);
         assert_eq!(fused.len(), 3);
     }
 
     #[test]
     fn only_judgments_above_the_floor_are_relevant() {
+        let [noise, faint, strong, clear] =
+            ["aaaaaaa1", "aaaaaaa2", "aaaaaaa3", "aaaaaaa4"].map(|it| Id::parse(it).unwrap());
         let judgments = [
-            Judgment { memory_id: 1, logit: -8.0 },
-            Judgment { memory_id: 2, logit: -3.3 },
-            Judgment { memory_id: 3, logit: 7.1 },
-            Judgment { memory_id: 4, logit: 0.5 },
+            Judgment { memory_id: noise, logit: -8.0 },
+            Judgment { memory_id: faint, logit: -3.3 },
+            Judgment { memory_id: strong, logit: 7.1 },
+            Judgment { memory_id: clear, logit: 0.5 },
         ];
 
-        let ids: Vec<i64> = relevant_among(&judgments, 5).iter().map(|it| it.id).collect();
-        assert_eq!(ids, vec![3, 4, 2]);
+        let ids: Vec<Id> = relevant_among(&judgments, 5).iter().map(|it| it.id).collect();
+        assert_eq!(ids, vec![strong, clear, faint]);
 
-        let capped: Vec<i64> = relevant_among(&judgments, 2).iter().map(|it| it.id).collect();
-        assert_eq!(capped, vec![3, 4]);
+        let capped: Vec<Id> = relevant_among(&judgments, 2).iter().map(|it| it.id).collect();
+        assert_eq!(capped, vec![strong, clear]);
 
-        let noise = [Judgment { memory_id: 1, logit: -8.0 }, Judgment { memory_id: 2, logit: -10.2 }];
-        assert!(relevant_among(&noise, 5).is_empty());
+        let nothing = [Judgment { memory_id: noise, logit: -8.0 }, Judgment { memory_id: faint, logit: -10.2 }];
+        assert!(relevant_among(&nothing, 5).is_empty());
     }
 
     #[test]

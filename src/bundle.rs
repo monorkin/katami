@@ -20,6 +20,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::clock::timestamp;
+use crate::id::Id;
 use crate::memory::{CLASSES, Kind, Portable};
 
 const FORMAT: u32 = 1;
@@ -35,7 +36,7 @@ struct Manifest {
     memories: usize,
 }
 
-pub fn write(path: &Path, memories: &[(i64, Portable)]) -> Result<()> {
+pub fn write(path: &Path, memories: &[Portable]) -> Result<()> {
     let file = std::fs::File::create_new(path)
         .with_context(|| format!("could not create {} — pick another path with --to", path.display()))?;
     let mut zip = ZipWriter::new(file);
@@ -50,8 +51,9 @@ pub fn write(path: &Path, memories: &[(i64, Portable)]) -> Result<()> {
     zip.start_file(MANIFEST, options)?;
     zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
 
-    for (id, portable) in memories {
-        zip.start_file(format!("{MEMORIES_DIRECTORY}{id:05}-{}.md", slug(&portable.title)), options)?;
+    for portable in memories {
+        let name = format!("{MEMORIES_DIRECTORY}{}-{}.md", portable.id, slug(&portable.title));
+        zip.start_file(name, options)?;
         zip.write_all(to_markdown(portable).as_bytes())?;
     }
     zip.finish()?;
@@ -73,12 +75,15 @@ pub fn read(path: &Path) -> Result<Vec<Portable>> {
         );
     }
 
-    let mut names: Vec<String> = zip
-        .file_names()
-        .filter(|it| it.starts_with(MEMORIES_DIRECTORY) && it.ends_with(".md"))
-        .map(str::to_string)
-        .collect();
-    names.sort();
+    // Entries are read in the order they were written, which is the order the
+    // memories were learned in — the names sort by id, which is random
+    let mut names = Vec::new();
+    for index in 0..zip.len() {
+        let name = zip.by_index(index)?.name().to_string();
+        if name.starts_with(MEMORIES_DIRECTORY) && name.ends_with(".md") {
+            names.push(name);
+        }
+    }
 
     names
         .iter()
@@ -101,7 +106,7 @@ fn entry_text(zip: &mut ZipArchive<std::fs::File>, name: &str) -> Result<String>
 }
 
 pub fn to_markdown(portable: &Portable) -> String {
-    let mut frontmatter = vec![format!("kind: {}", portable.kind)];
+    let mut frontmatter = vec![format!("id: {}", portable.id), format!("kind: {}", portable.kind)];
     if let Some(class) = &portable.class {
         frontmatter.push(format!("class: {class}"));
     }
@@ -135,7 +140,9 @@ pub fn from_markdown(text: &str) -> Result<Portable> {
 
     let now = timestamp();
     let mut kind = None;
+    let mut id = None;
     let mut portable = Portable {
+        id: Id::generate(),
         kind: Kind::Observation,
         class: None,
         entity: None,
@@ -155,6 +162,7 @@ pub fn from_markdown(text: &str) -> Result<Portable> {
             .with_context(|| format!("frontmatter line `{line}` is not `key: value`"))?;
         let value = value.trim();
         match key.trim() {
+            "id" => id = Some(Id::parse(value)?),
             "kind" => {
                 kind = Some(
                     Kind::parse(value)
@@ -178,6 +186,9 @@ pub fn from_markdown(text: &str) -> Result<Portable> {
         }
     }
     portable.kind = kind.context("the frontmatter has no `kind`")?;
+    if let Some(id) = id {
+        portable.id = id;
+    }
 
     let content = content.trim_start_matches('\n');
     let (heading, body) = content.split_once('\n').unwrap_or((content, ""));
@@ -221,9 +232,10 @@ mod tests {
 
     fn rebase_preference() -> Portable {
         Portable {
+            id: Id::parse("k7m2p9xq").unwrap(),
             kind: Kind::Observation,
             class: Some("preference".into()),
-            entity: Some("project:/home/someone/Work/app".into()),
+            entity: Some("project:example.com/acme/app".into()),
             title: "Prefers rebase over merge".into(),
             body: "Rebase feature branches.\n\n---\n\n# Not a title\nSee [[Commit message style]].".into(),
             links: vec!["Commit message style".into(), "Review workflow".into()],
@@ -268,6 +280,7 @@ mod tests {
             ("# No frontmatter\n\nBody.", "frontmatter block"),
             ("---\nclass: preference\n---\n# T\n\nB", "no `kind`"),
             ("---\nkind: note\n---\n# T\n\nB", "unknown kind"),
+            ("---\nid: 45\nkind: observation\n---\n# T\n\nB", "not a memory id"),
             ("---\nkind: observation\nclass: vibe\n---\n# T\n\nB", "unknown class"),
             ("---\nkind: observation\npinned: yes\n---\n# T\n\nB", "true or false"),
             ("---\nkind: observation\ncolour: red\n---\n# T\n\nB", "unknown frontmatter key"),
@@ -287,8 +300,13 @@ mod tests {
         let path = directory.join("bundle.zip");
         let _ = std::fs::remove_file(&path);
 
-        let card = Portable { kind: Kind::Card, title: "App".into(), ..rebase_preference() };
-        write(&path, &[(7, rebase_preference()), (12, card.clone())]).unwrap();
+        let card = Portable {
+            id: Id::parse("b3x0t8hd").unwrap(),
+            kind: Kind::Card,
+            title: "App".into(),
+            ..rebase_preference()
+        };
+        write(&path, &[rebase_preference(), card.clone()]).unwrap();
         assert_eq!(read(&path).unwrap(), vec![rebase_preference(), card]);
 
         assert!(write(&path, &[]).is_err(), "an existing file must not be overwritten");

@@ -9,6 +9,7 @@ mod flock;
 mod fsutil;
 mod hook_client;
 mod hook_protocol;
+mod id;
 mod launch;
 mod launches;
 mod log_cli;
@@ -143,13 +144,13 @@ enum MemoryCommand {
     /// Show what a prompt would get injected, and what was judged irrelevant
     Judge { prompt: String },
     /// Show one memory with its links
-    Show { id: i64 },
+    Show { id: String },
     /// Open a memory in $EDITOR
-    Edit { id: i64 },
+    Edit { id: String },
     /// Archive a memory so it stops being injected
-    Archive { id: i64 },
+    Archive { id: String },
     /// Bring an archived memory back
-    Unarchive { id: i64 },
+    Unarchive { id: String },
     /// List memories with their usage counts
     List {
         /// Include archived memories
@@ -271,10 +272,10 @@ fn run(cli: Cli) -> Result<()> {
             } => memory_cli::add(&title, &body, entity, link, card),
             MemoryCommand::Search { query } => memory_cli::search(&query),
             MemoryCommand::Judge { prompt } => memory_cli::judge(&prompt),
-            MemoryCommand::Show { id } => memory_cli::show(id),
-            MemoryCommand::Edit { id } => memory_cli::edit(id),
-            MemoryCommand::Archive { id } => memory_cli::archive(id),
-            MemoryCommand::Unarchive { id } => memory_cli::unarchive(id),
+            MemoryCommand::Show { id } => memory_cli::show(&id),
+            MemoryCommand::Edit { id } => memory_cli::edit(&id),
+            MemoryCommand::Archive { id } => memory_cli::archive(&id),
+            MemoryCommand::Unarchive { id } => memory_cli::unarchive(&id),
             MemoryCommand::List {
                 with_archived,
                 archived,

@@ -21,6 +21,7 @@ use std::thread;
 
 use crate::curator;
 use crate::hook_protocol::{self, HookRequest, Tool};
+use crate::id::Id;
 use crate::launches;
 use crate::logs;
 use crate::memory::{Kind, Memory};
@@ -258,7 +259,7 @@ fn config_dir(request: &HookRequest) -> PathBuf {
 fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> {
     let memory = Memory::open(&paths::memory_dir())?;
     let all = memory.list()?;
-    let mut included: Vec<i64> = Vec::new();
+    let mut included: Vec<Id> = Vec::new();
     let mut sections = Vec::new();
 
     if let Some(cwd) = request.payload["cwd"].as_str() {
@@ -280,7 +281,7 @@ fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> 
             ));
         }
     }
-    let pinned_ids: Vec<i64> = all
+    let pinned_ids: Vec<Id> = all
         .iter()
         .filter(|it| it.pinned && !included.contains(&it.id))
         .map(|it| it.id)
@@ -337,7 +338,7 @@ fn record_judgments(request: &HookRequest, prompt: &str, judgments: Vec<search::
 /// The delivery manifest is bookkeeping, and bookkeeping happens off the
 /// reply path — the hook client only waits 1500ms, and a reviewer holding
 /// the write lock must not eat that budget.
-fn record_deliveries(request: &HookRequest, event: &'static str, full: Vec<i64>, pointers: Vec<i64>) {
+fn record_deliveries(request: &HookRequest, event: &'static str, full: Vec<Id>, pointers: Vec<Id>) {
     let session = request.payload["session_id"].as_str().unwrap_or("?").to_string();
     thread::spawn(move || {
         let Ok(memory) = Memory::open(&paths::memory_dir()) else {

@@ -57,11 +57,11 @@ pub fn search(query: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:>4}  {:<10}  {:<11}  title", "id", "updated", "kind");
+    println!("{:<8}{:<10}  {:<11}  title", "id", "updated", "kind");
     for hit in hits {
         let stored = memory.get(hit.id)?;
         println!(
-            "{:>4}  {:<10}  {:<11}  {}",
+            "{:<8}{:<10}  {:<11}  {}",
             stored.id,
             &stored.updated[..10],
             stored.kind,
@@ -81,7 +81,7 @@ pub fn judge(prompt: &str) -> Result<()> {
     let mut judgments = selection.judgments;
     judgments.sort_by(|a, b| b.logit.total_cmp(&a.logit));
 
-    println!("{:>4}  {:>6}  {:<8}  title", "id", "logit", "verdict");
+    println!("{:<8}{:>6}  {:<8}  title", "id", "logit", "verdict");
     for judgment in judgments {
         let verdict = if selection.hits.iter().any(|it| it.id == judgment.memory_id) {
             "injected"
@@ -89,7 +89,7 @@ pub fn judge(prompt: &str) -> Result<()> {
             "skipped"
         };
         println!(
-            "{:>4}  {:>6.1}  {:<8}  {}",
+            "{:<8}{:>6.1}  {:<8}  {}",
             judgment.memory_id,
             judgment.logit,
             verdict,
@@ -99,8 +99,9 @@ pub fn judge(prompt: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn show(id: i64) -> Result<()> {
+pub fn show(id: &str) -> Result<()> {
     let memory = open()?;
+    let id = memory.resolve(id)?;
     let stored = memory.get(id)?;
 
     println!("# {} ({})", stored.title, stored.kind);
@@ -136,7 +137,7 @@ pub fn list(filter: ListFilter, kinds: Option<&str>, sort_by: Option<&str>) -> R
     }
 
     println!(
-        "{:>4}  {:<10}  {:<11}  {:>5}  {:<10}  title",
+        "{:<8}{:<10}  {:<11}  {:>5}  {:<10}  title",
         "id", "updated", "kind", "uses", "last used"
     );
     for row in rows {
@@ -152,7 +153,7 @@ pub fn list(filter: ListFilter, kinds: Option<&str>, sort_by: Option<&str>) -> R
             None => "never",
         };
         println!(
-            "{:>4}  {:<10}  {:<11}  {:>5}  {last_used:<10}  {title}",
+            "{:<8}{:<10}  {:<11}  {:>5}  {last_used:<10}  {title}",
             row.stored.id,
             &row.stored.updated[..10],
             row.stored.kind,
@@ -210,8 +211,9 @@ fn parse_sort_key(term: &str) -> Result<SortKey> {
     Ok(SortKey { column, descending })
 }
 
-pub fn archive(id: i64) -> Result<()> {
+pub fn archive(id: &str) -> Result<()> {
     let memory = open()?;
+    let id = memory.resolve(id)?;
     let stored = memory.get(id)?;
     memory.archive(id, "manual")?;
     println!(
@@ -221,15 +223,17 @@ pub fn archive(id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn unarchive(id: i64) -> Result<()> {
+pub fn unarchive(id: &str) -> Result<()> {
     let memory = open()?;
+    let id = memory.resolve(id)?;
     memory.unarchive(id)?;
     println!("Unarchived {id}: {}", memory.get(id)?.title);
     Ok(())
 }
 
-pub fn edit(id: i64) -> Result<()> {
+pub fn edit(id: &str) -> Result<()> {
     let memory = open()?;
+    let id = memory.resolve(id)?;
     let stored = memory.get(id)?;
 
     let path = std::env::temp_dir().join(format!("katami-memory-{id}.md"));

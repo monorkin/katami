@@ -23,6 +23,7 @@ use crate::distiller;
 use crate::embeddings;
 use crate::flock;
 use crate::hook_protocol::Tool;
+use crate::id::Id;
 use crate::logs;
 use crate::memory::{CLASSES, Kind, Memory, NewMemory, NewReviewChunk, ReviewChunk};
 use crate::paths;
@@ -64,7 +65,7 @@ struct Observation {
     #[serde(default)]
     links: Vec<String>,
     #[serde(default)]
-    supersedes: Vec<i64>,
+    supersedes: Vec<Id>,
 }
 
 #[derive(Deserialize)]
@@ -77,7 +78,7 @@ struct StatusChange {
 
 #[derive(Deserialize)]
 struct Retraction {
-    id: i64,
+    id: Id,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -300,7 +301,7 @@ fn known_context(
     memory: &Memory,
     entity: Option<&str>,
     turns: &[LabeledTurn],
-) -> Result<(String, Vec<i64>)> {
+) -> Result<(String, Vec<Id>)> {
     let mut known = String::from(
         "What you already know (do not restate; supersede or retract by id when the conversation changes an item):\n",
     );
@@ -374,7 +375,7 @@ fn render_turns(turns: &[LabeledTurn]) -> String {
 /// Everything that can be wrong with a review, checked before anything is
 /// written so a bad reply costs a correction round, not a rolled-back
 /// transaction.
-fn validate(memory: &Memory, review: &Review, turns: &[LabeledTurn], shown_ids: &[i64]) -> Result<()> {
+fn validate(memory: &Memory, review: &Review, turns: &[LabeledTurn], shown_ids: &[Id]) -> Result<()> {
     for observation in &review.observations {
         if !CLASSES.contains(&observation.class.as_str()) {
             anyhow::bail!(
@@ -504,7 +505,7 @@ fn cited_turns<'turns>(
     Ok(cited)
 }
 
-fn assert_changeable(memory: &Memory, id: i64, shown_ids: &[i64]) -> Result<()> {
+fn assert_changeable(memory: &Memory, id: Id, shown_ids: &[Id]) -> Result<()> {
     if !shown_ids.contains(&id) {
         anyhow::bail!("the review named id {id}, which it was never shown");
     }
@@ -588,9 +589,9 @@ Extract:
 1. Observations: durable facts that will still be true in a month — the user's preferences, corrections they gave, facts about themselves, their projects, and the people they work with. NOT the state of in-progress work, and NOT anything the store already knows. Each observation carries:
    - "class": one of preference, constraint, identity, relationship, decision, history, reference
    - "evidence_turns": the turn labels that justify it, at least one N turn; preferences, constraints, and identity facts need a new USER turn
-   - "supersedes": ids of shown [id N] items this observation replaces
+   - "supersedes": ids of shown items this observation replaces — copy each id exactly as shown, like "k7m2p9xq" from [id k7m2p9xq; …]
    An observation's entity is what the fact is ABOUT, not where it was discussed — a fact about a tool, a service, or general practice gets no entity even when it came up inside a project. Skip anything derivable from the code itself, and skip discussion about this memory system.
-2. Retracts: shown [id N] items the conversation revealed to be no longer true, with nothing replacing them.
+2. Retracts: shown [id …] items the conversation revealed to be no longer true, with nothing replacing them.
 3. Status: {{"op":"replace","body":"..."}} rewrites the project's in-flight-work snapshot wholesale (open PRs, half-done migrations, blocked work — restate anything still in flight); {{"op":"clear"}} says the in-flight work is finished; omit the field entirely when this conversation carries no evidence either way.
 4. Skill proposals: only when the user dictated or corrected a multi-step procedure they'll clearly want again. Most conversations have none.
 
@@ -600,7 +601,7 @@ Entity rules — copy these strings exactly:
 - A fact about the user themselves or any other topic: omit entity
 
 Reply with ONLY this JSON, no prose:
-{{"observations":[{{"title":"short title","body":"the fact, one to three sentences","class":"preference","evidence_turns":["N2"],"entity":"see entity rules (optional)","links":[],"supersedes":[]}}],"retracts":[{{"id":7,"reason":"why"}}],"status":{{"op":"replace","body":"..."}},"skill_proposals":[{{"name":"kebab-case-name","description":"one line","instructions":"markdown instructions"}}]}}
+{{"observations":[{{"title":"short title","body":"the fact, one to three sentences","class":"preference","evidence_turns":["N2"],"entity":"see entity rules (optional)","links":[],"supersedes":[]}}],"retracts":[{{"id":"k7m2p9xq","reason":"why"}}],"status":{{"op":"replace","body":"..."}},"skill_proposals":[{{"name":"kebab-case-name","description":"one line","instructions":"markdown instructions"}}]}}
 
 All fields may be empty or absent. Titles must be short and distinctive — they double as link targets."#
     )
@@ -667,8 +668,9 @@ mod tests {
         .unwrap();
         assert!(validate(&memory, &no_user_evidence, &turns, &[]).is_err());
 
-        let unshown_retract: Review = serde_json::from_str(r#"{"retracts":[{"id":99}]}"#).unwrap();
+        let unshown_retract: Review = serde_json::from_str(r#"{"retracts":[{"id":"k7m2p9xq"}]}"#).unwrap();
         assert!(validate(&memory, &unshown_retract, &turns, &[]).is_err());
+        assert!(serde_json::from_str::<Review>(r#"{"retracts":[{"id":99}]}"#).is_err());
 
         let bogus_status: Review = serde_json::from_str(r#"{"status":{"op":"nuke"}}"#).unwrap();
         assert!(validate(&memory, &bogus_status, &turns, &[]).is_err());

@@ -7,11 +7,12 @@
 //! coordination; the reviewer and curator add their own flocks on top so
 //! only one of each runs at a time.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::path::Path;
 
 use crate::clock::timestamp;
+use crate::id::Id;
 use crate::project::Project;
 
 pub struct Memory {
@@ -196,6 +197,87 @@ const MIGRATE_5_TO_6: &str = "
     PRAGMA user_version = 6;
 ";
 
+/// Every table keyed by a memory's id. `local_row` is SQLite's rowid made
+/// explicit so a VACUUM can't renumber it underneath the full-text index; it
+/// also keeps the order memories were learned in. It never leaves this store.
+const MEMORY_TABLES: &str = "
+    CREATE TABLE memories (
+        local_row INTEGER PRIMARY KEY,
+        id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        class TEXT,
+        entity TEXT,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created TEXT NOT NULL,
+        updated TEXT NOT NULL,
+        source_session TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        archive_reason TEXT
+    );
+
+    CREATE VIRTUAL TABLE memories_fts USING fts5(
+        title, body, entity,
+        content='memories', content_rowid='local_row'
+    );
+
+    CREATE TRIGGER memories_insert AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, title, body, entity)
+        VALUES (new.local_row, new.title, new.body, new.entity);
+    END;
+    CREATE TRIGGER memories_delete AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, body, entity)
+        VALUES ('delete', old.local_row, old.title, old.body, old.entity);
+    END;
+    CREATE TRIGGER memories_update AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, body, entity)
+        VALUES ('delete', old.local_row, old.title, old.body, old.entity);
+        INSERT INTO memories_fts(rowid, title, body, entity)
+        VALUES (new.local_row, new.title, new.body, new.entity);
+    END;
+
+    CREATE TABLE links (
+        from_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        to_title TEXT NOT NULL,
+        PRIMARY KEY (from_id, to_title)
+    );
+
+    CREATE TABLE embeddings (
+        memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        vector BLOB NOT NULL
+    );
+
+    CREATE TABLE memory_deliveries (
+        id INTEGER PRIMARY KEY,
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        form TEXT NOT NULL,
+        delivered_at TEXT NOT NULL
+    );
+    CREATE INDEX deliveries_by_memory ON memory_deliveries(memory_id, delivered_at);
+
+    CREATE TABLE memory_evidence (
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        source_session TEXT,
+        turn_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        excerpt TEXT NOT NULL
+    );
+
+    CREATE TABLE relevance_judgments (
+        id INTEGER PRIMARY KEY,
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        model TEXT NOT NULL,
+        logit REAL NOT NULL,
+        judged_at TEXT NOT NULL
+    );
+";
+
 pub struct NewReviewChunk {
     pub transcript_path: String,
     pub source_session: Option<String>,
@@ -251,7 +333,7 @@ pub enum SortColumn {
 impl SortColumn {
     fn as_sql(self) -> &'static str {
         match self {
-            SortColumn::Id => "m.id",
+            SortColumn::Id => "m.local_row",
             SortColumn::Updated => "m.updated",
             SortColumn::Kind => "m.kind",
             SortColumn::Uses => "uses",
@@ -269,10 +351,12 @@ pub struct GeneratedSkill {
 }
 
 /// A memory as it travels between stores: everything that is the memory
-/// itself, and nothing about how one store came by it or used it — ids,
-/// sessions, evidence, deliveries, and embeddings all stay behind.
+/// itself, under the id it has everywhere, and nothing about how one store
+/// came by it or used it — sessions, evidence, deliveries, and embeddings all
+/// stay behind.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Portable {
+    pub id: Id,
     pub kind: Kind,
     pub class: Option<String>,
     pub entity: Option<String>,
@@ -287,7 +371,7 @@ pub struct Portable {
 }
 
 pub struct Stored {
-    pub id: i64,
+    pub id: Id,
     pub kind: Kind,
     pub entity: Option<String>,
     pub title: String,
@@ -349,6 +433,9 @@ impl Memory {
             if memory.schema_version()? == 5 {
                 memory.connection.execute_batch(MIGRATE_5_TO_6)?;
             }
+            if memory.schema_version()? == 6 {
+                memory.migrate_to_global_ids()?;
+            }
             Ok(())
         })
     }
@@ -376,48 +463,85 @@ impl Memory {
         }
     }
 
-    fn create_schema(&self) -> Result<()> {
+    /// v7 swaps the counted integer ids for random ones that hold on every
+    /// machine. Each memory table is rebuilt around the new ids; the old id
+    /// becomes `local_row`, so memories keep the order they were learned in.
+    fn migrate_to_global_ids(&self) -> Result<()> {
         self.connection.execute_batch(
             "
-            CREATE TABLE memories (
-                id INTEGER PRIMARY KEY,
-                kind TEXT NOT NULL,
-                entity TEXT,
-                title TEXT NOT NULL,
-                body TEXT NOT NULL,
-                created TEXT NOT NULL,
-                updated TEXT NOT NULL,
-                source_session TEXT,
-                pinned INTEGER NOT NULL DEFAULT 0,
-                archived INTEGER NOT NULL DEFAULT 0
-            );
+            DROP TRIGGER IF EXISTS memories_insert;
+            DROP TRIGGER IF EXISTS memories_delete;
+            DROP TRIGGER IF EXISTS memories_update;
+            DROP TABLE memories_fts;
+            DROP INDEX deliveries_by_memory;
+            ALTER TABLE memories RENAME TO memories_v6;
+            ALTER TABLE links RENAME TO links_v6;
+            ALTER TABLE embeddings RENAME TO embeddings_v6;
+            ALTER TABLE memory_deliveries RENAME TO memory_deliveries_v6;
+            ALTER TABLE memory_evidence RENAME TO memory_evidence_v6;
+            ALTER TABLE relevance_judgments RENAME TO relevance_judgments_v6;
+            CREATE TABLE new_ids (old INTEGER PRIMARY KEY, new TEXT NOT NULL UNIQUE);
+            ",
+        )?;
+        self.connection.execute_batch(MEMORY_TABLES)?;
 
-            CREATE VIRTUAL TABLE memories_fts USING fts5(
-                title, body, entity,
-                content='memories', content_rowid='id'
-            );
+        let old_ids: Vec<i64> = self
+            .connection
+            .prepare("SELECT id FROM memories_v6 ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for old in old_ids {
+            self.connection.execute(
+                "INSERT INTO new_ids (old, new) VALUES (?1, ?2)",
+                rusqlite::params![old, Id::generate()],
+            )?;
+        }
 
-            CREATE TRIGGER memories_insert AFTER INSERT ON memories BEGIN
-                INSERT INTO memories_fts(rowid, title, body, entity)
-                VALUES (new.id, new.title, new.body, new.entity);
-            END;
-            CREATE TRIGGER memories_delete AFTER DELETE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, title, body, entity)
-                VALUES ('delete', old.id, old.title, old.body, old.entity);
-            END;
-            CREATE TRIGGER memories_update AFTER UPDATE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, title, body, entity)
-                VALUES ('delete', old.id, old.title, old.body, old.entity);
-                INSERT INTO memories_fts(rowid, title, body, entity)
-                VALUES (new.id, new.title, new.body, new.entity);
-            END;
+        self.connection.execute_batch(
+            "
+            INSERT INTO memories
+                (local_row, id, kind, class, entity, title, body, created, updated,
+                 source_session, pinned, archived, archive_reason)
+            SELECT m.id, n.new, m.kind, m.class, m.entity, m.title, m.body, m.created, m.updated,
+                   m.source_session, m.pinned, m.archived, m.archive_reason
+            FROM memories_v6 m JOIN new_ids n ON n.old = m.id ORDER BY m.id;
 
-            CREATE TABLE links (
-                from_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-                to_title TEXT NOT NULL,
-                PRIMARY KEY (from_id, to_title)
-            );
+            INSERT INTO links (from_id, to_title)
+            SELECT n.new, l.to_title FROM links_v6 l JOIN new_ids n ON n.old = l.from_id;
 
+            INSERT INTO embeddings (memory_id, model, vector)
+            SELECT n.new, e.model, e.vector FROM embeddings_v6 e JOIN new_ids n ON n.old = e.memory_id;
+
+            INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
+            SELECT n.new, d.session_id, d.event, d.form, d.delivered_at
+            FROM memory_deliveries_v6 d JOIN new_ids n ON n.old = d.memory_id ORDER BY d.id;
+
+            INSERT INTO memory_evidence (memory_id, source_session, turn_id, role, excerpt)
+            SELECT n.new, e.source_session, e.turn_id, e.role, e.excerpt
+            FROM memory_evidence_v6 e JOIN new_ids n ON n.old = e.memory_id;
+
+            INSERT INTO relevance_judgments (memory_id, session_id, prompt, model, logit, judged_at)
+            SELECT n.new, j.session_id, j.prompt, j.model, j.logit, j.judged_at
+            FROM relevance_judgments_v6 j JOIN new_ids n ON n.old = j.memory_id ORDER BY j.id;
+
+            DROP TABLE links_v6;
+            DROP TABLE embeddings_v6;
+            DROP TABLE memory_deliveries_v6;
+            DROP TABLE memory_evidence_v6;
+            DROP TABLE relevance_judgments_v6;
+            DROP TABLE memories_v6;
+            DROP TABLE new_ids;
+
+            PRAGMA user_version = 7;
+            ",
+        )?;
+        Ok(())
+    }
+
+    fn create_schema(&self) -> Result<()> {
+        self.connection.execute_batch(MEMORY_TABLES)?;
+        self.connection.execute_batch(
+            "
             CREATE TABLE usage (
                 kind TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -446,33 +570,6 @@ impl Memory {
                 archived INTEGER NOT NULL DEFAULT 0
             );
 
-            CREATE TABLE embeddings (
-                memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-                model TEXT NOT NULL,
-                vector BLOB NOT NULL
-            );
-
-            ALTER TABLE memories ADD COLUMN class TEXT;
-            ALTER TABLE memories ADD COLUMN archive_reason TEXT;
-
-            CREATE TABLE memory_deliveries (
-                id INTEGER PRIMARY KEY,
-                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-                session_id TEXT NOT NULL,
-                event TEXT NOT NULL,
-                form TEXT NOT NULL,
-                delivered_at TEXT NOT NULL
-            );
-            CREATE INDEX deliveries_by_memory ON memory_deliveries(memory_id, delivered_at);
-
-            CREATE TABLE memory_evidence (
-                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-                source_session TEXT,
-                turn_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                excerpt TEXT NOT NULL
-            );
-
             CREATE TABLE review_chunks (
                 id INTEGER PRIMARY KEY,
                 transcript_path TEXT NOT NULL,
@@ -493,33 +590,25 @@ impl Memory {
                 last_seen TEXT NOT NULL
             );
 
-            CREATE TABLE relevance_judgments (
-                id INTEGER PRIMARY KEY,
-                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-                session_id TEXT NOT NULL,
-                prompt TEXT NOT NULL,
-                model TEXT NOT NULL,
-                logit REAL NOT NULL,
-                judged_at TEXT NOT NULL
-            );
-
             CREATE TABLE project_roots (
                 entity TEXT PRIMARY KEY,
                 root_commit TEXT NOT NULL
             );
 
-            PRAGMA user_version = 6;
+            PRAGMA user_version = 7;
             ",
         )?;
         Ok(())
     }
 
-    pub fn add(&self, memory: &NewMemory) -> Result<i64> {
+    pub fn add(&self, memory: &NewMemory) -> Result<Id> {
+        let id = Id::generate();
         let now = timestamp();
         self.connection.execute(
-            "INSERT INTO memories (kind, entity, title, body, created, updated, source_session, class)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+            "INSERT INTO memories (id, kind, entity, title, body, created, updated, source_session, class)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
             rusqlite::params![
+                id,
                 memory.kind.as_str(),
                 memory.entity,
                 memory.title,
@@ -529,7 +618,6 @@ impl Memory {
                 memory.class,
             ],
         )?;
-        let id = self.connection.last_insert_rowid();
 
         for title in &memory.links {
             self.connection.execute(
@@ -540,7 +628,7 @@ impl Memory {
         Ok(id)
     }
 
-    pub fn get(&self, id: i64) -> Result<Stored> {
+    pub fn get(&self, id: Id) -> Result<Stored> {
         self.connection
             .query_row(
                 "SELECT id, kind, entity, title, body, pinned, archived, updated
@@ -562,7 +650,7 @@ impl Memory {
 
     /// Everything one hop away over [[links]], in both directions: what this
     /// memory links to, and what links back to its title.
-    pub fn neighbors(&self, id: i64) -> Result<Vec<Stored>> {
+    pub fn neighbors(&self, id: Id) -> Result<Vec<Stored>> {
         let mut statement = self.connection.prepare(
             "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated
              FROM memories m
@@ -578,7 +666,7 @@ impl Memory {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn set_embedding(&self, id: i64, model: &str, vector: &[f32]) -> Result<()> {
+    pub fn set_embedding(&self, id: Id, model: &str, vector: &[f32]) -> Result<()> {
         let mut blob = Vec::with_capacity(vector.len() * 4);
         for value in vector {
             blob.extend_from_slice(&value.to_le_bytes());
@@ -591,14 +679,14 @@ impl Memory {
         Ok(())
     }
 
-    pub fn embeddings(&self, model: &str) -> Result<Vec<(i64, Vec<f32>)>> {
+    pub fn embeddings(&self, model: &str) -> Result<Vec<(Id, Vec<f32>)>> {
         let mut statement = self.connection.prepare(
             "SELECT e.memory_id, e.vector FROM embeddings e
              JOIN memories m ON m.id = e.memory_id
              WHERE e.model = ?1 AND m.archived = 0 AND m.kind != 'status'",
         )?;
         let rows = statement.query_map([model], |row| {
-            let id: i64 = row.get(0)?;
+            let id: Id = row.get(0)?;
             let blob: Vec<u8> = row.get(1)?;
             let vector = blob
                 .chunks_exact(4)
@@ -694,7 +782,7 @@ impl Memory {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn update_body(&self, id: i64, body: &str) -> Result<()> {
+    pub fn update_body(&self, id: Id, body: &str) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET body = ?2, updated = ?3 WHERE id = ?1",
             rusqlite::params![id, body, timestamp()],
@@ -702,7 +790,7 @@ impl Memory {
         Ok(())
     }
 
-    pub fn archive(&self, id: i64, reason: &str) -> Result<()> {
+    pub fn archive(&self, id: Id, reason: &str) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET archived = 1, archive_reason = ?2, updated = ?3 WHERE id = ?1",
             rusqlite::params![id, reason, timestamp()],
@@ -710,7 +798,7 @@ impl Memory {
         Ok(())
     }
 
-    pub fn record_delivery(&self, memory_id: i64, session_id: &str, event: &str, form: &str) -> Result<()> {
+    pub fn record_delivery(&self, memory_id: Id, session_id: &str, event: &str, form: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -721,7 +809,7 @@ impl Memory {
 
     pub fn record_judgment(
         &self,
-        memory_id: i64,
+        memory_id: Id,
         session_id: &str,
         prompt: &str,
         model: &str,
@@ -737,7 +825,7 @@ impl Memory {
 
     pub fn add_evidence(
         &self,
-        memory_id: i64,
+        memory_id: Id,
         source_session: Option<&str>,
         turn_id: &str,
         role: &str,
@@ -833,7 +921,7 @@ impl Memory {
         Ok(moved)
     }
 
-    pub fn unarchive(&self, id: i64) -> Result<()> {
+    pub fn unarchive(&self, id: Id) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET archived = 0, updated = ?2 WHERE id = ?1",
             rusqlite::params![id, timestamp()],
@@ -873,7 +961,7 @@ impl Memory {
             "SELECT m.id, m.kind, m.entity, m.title, m.body, m.pinned, m.archived, m.updated,
                     (SELECT COUNT(*) FROM memory_deliveries d WHERE d.memory_id = m.id) AS uses,
                     (SELECT MAX(delivered_at) FROM memory_deliveries d WHERE d.memory_id = m.id) AS last_used
-             FROM memories m WHERE {} ORDER BY {}, m.id DESC",
+             FROM memories m WHERE {} ORDER BY {}, m.local_row DESC",
             conditions.join(" AND "),
             order.join(", ")
         ))?;
@@ -887,7 +975,7 @@ impl Memory {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn update(&self, id: i64, title: &str, body: &str, entity: Option<&str>) -> Result<()> {
+    pub fn update(&self, id: Id, title: &str, body: &str, entity: Option<&str>) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET title = ?2, body = ?3, entity = ?4, updated = ?5 WHERE id = ?1",
             rusqlite::params![id, title, body, entity, timestamp()],
@@ -895,7 +983,7 @@ impl Memory {
         Ok(())
     }
 
-    pub fn replace_links(&self, id: i64, links: &[String]) -> Result<()> {
+    pub fn replace_links(&self, id: Id, links: &[String]) -> Result<()> {
         self.connection
             .execute("DELETE FROM links WHERE from_id = ?1", [id])?;
         for title in links {
@@ -907,13 +995,13 @@ impl Memory {
         Ok(())
     }
 
-    pub fn ids(&self) -> Result<Vec<i64>> {
-        let mut statement = self.connection.prepare("SELECT id FROM memories ORDER BY id")?;
+    pub fn ids(&self) -> Result<Vec<Id>> {
+        let mut statement = self.connection.prepare("SELECT id FROM memories ORDER BY local_row")?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn portable(&self, id: i64) -> Result<Portable> {
+    pub fn portable(&self, id: Id) -> Result<Portable> {
         let mut statement = self
             .connection
             .prepare("SELECT to_title FROM links WHERE from_id = ?1 ORDER BY to_title")?;
@@ -928,6 +1016,7 @@ impl Memory {
                 [id],
                 |row| {
                     Ok(Portable {
+                        id,
                         kind: row.get(0)?,
                         class: row.get(1)?,
                         entity: row.get(2)?,
@@ -945,12 +1034,40 @@ impl Memory {
             .with_context(|| format!("no memory with id {id} — see `katami memory list`"))
     }
 
+    /// What a person types for an id: all of it, or just enough of its start
+    /// to single one memory out.
+    pub fn resolve(&self, typed: &str) -> Result<Id> {
+        if typed.is_empty() || !typed.bytes().all(|it| it.is_ascii_alphanumeric()) {
+            bail!("`{typed}` is not a memory id — see `katami memory list`");
+        }
+
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM memories WHERE id LIKE ?1 || '%' ORDER BY id LIMIT 2")?;
+        let matches = statement
+            .query_map([typed], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<Id>>>()?;
+        match matches.as_slice() {
+            [] => bail!("no memory with id {typed} — see `katami memory list`"),
+            [only] => Ok(*only),
+            _ => bail!("several ids start with {typed} — type more of it"),
+        }
+    }
+
+    pub fn exists(&self, id: Id) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row("SELECT EXISTS (SELECT 1 FROM memories WHERE id = ?1)", [id], |row| row.get(0))?)
+    }
+
     /// The memories already here that an arriving one could be another copy
-    /// of, live ones first. Cards and statuses are one per entity whatever
-    /// they're titled; observations are the same memory when title and entity
-    /// both match. There can be several — superseded versions stay behind as
-    /// archived rows.
-    pub fn twins_of(&self, portable: &Portable) -> Result<Vec<i64>> {
+    /// of, live ones first — for a memory that arrives under an id this store
+    /// has never seen, from a bundle written by hand or by a store that
+    /// learned the same thing separately. Cards and statuses are one per
+    /// entity whatever they're titled; observations are the same memory when
+    /// title and entity both match. There can be several — superseded
+    /// versions stay behind as archived rows.
+    pub fn twins_of(&self, portable: &Portable) -> Result<Vec<Id>> {
         let (title_matters, title) = match portable.kind {
             Kind::Observation => (true, portable.title.as_str()),
             Kind::Card | Kind::Status => (false, ""),
@@ -958,7 +1075,7 @@ impl Memory {
         let mut statement = self.connection.prepare(
             "SELECT id FROM memories
              WHERE kind = ?1 AND entity IS ?2 AND (?3 = 0 OR title = ?4)
-             ORDER BY archived, id",
+             ORDER BY archived, local_row",
         )?;
         let rows = statement.query_map(
             rusqlite::params![portable.kind.as_str(), portable.entity, title_matters, title],
@@ -967,12 +1084,13 @@ impl Memory {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn import(&self, portable: &Portable) -> Result<i64> {
+    pub fn import(&self, portable: &Portable) -> Result<Id> {
         self.connection.execute(
             "INSERT INTO memories
-                (kind, class, entity, title, body, pinned, archived, archive_reason, created, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (id, kind, class, entity, title, body, pinned, archived, archive_reason, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
+                portable.id,
                 portable.kind.as_str(),
                 portable.class,
                 portable.entity,
@@ -985,12 +1103,11 @@ impl Memory {
                 portable.updated,
             ],
         )?;
-        let id = self.connection.last_insert_rowid();
-        self.replace_links(id, &portable.links)?;
-        Ok(id)
+        self.replace_links(portable.id, &portable.links)?;
+        Ok(portable.id)
     }
 
-    pub fn overwrite(&self, id: i64, portable: &Portable) -> Result<()> {
+    pub fn overwrite(&self, id: Id, portable: &Portable) -> Result<()> {
         self.connection.execute(
             "UPDATE memories SET class = ?2, title = ?3, body = ?4, pinned = ?5, archived = ?6,
                                  archive_reason = ?7, updated = ?8
@@ -1009,7 +1126,7 @@ impl Memory {
         self.replace_links(id, &portable.links)
     }
 
-    pub fn unembedded(&self, model: &str) -> Result<Vec<(i64, String)>> {
+    pub fn unembedded(&self, model: &str) -> Result<Vec<(Id, String)>> {
         let mut statement = self.connection.prepare(
             "SELECT m.id, m.title || char(10) || m.body FROM memories m
              LEFT JOIN embeddings e ON e.memory_id = m.id AND e.model = ?1
@@ -1357,7 +1474,118 @@ mod tests {
         assert_eq!(neighbors_of_second[0].title, "ax uses flocks");
     }
 
-    fn observation_about(memory: &Memory, entity: &str, title: &str) -> i64 {
+    const V6_STORE: &str = "
+        CREATE TABLE memories (
+            id INTEGER PRIMARY KEY, kind TEXT NOT NULL, entity TEXT, title TEXT NOT NULL,
+            body TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, source_session TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+            class TEXT, archive_reason TEXT
+        );
+        CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, entity, content='memories', content_rowid='id');
+        CREATE TRIGGER memories_insert AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, title, body, entity) VALUES (new.id, new.title, new.body, new.entity);
+        END;
+        CREATE TABLE links (from_id INTEGER NOT NULL, to_title TEXT NOT NULL, PRIMARY KEY (from_id, to_title));
+        CREATE TABLE embeddings (memory_id INTEGER PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);
+        CREATE TABLE memory_deliveries (
+            id INTEGER PRIMARY KEY, memory_id INTEGER NOT NULL, session_id TEXT NOT NULL,
+            event TEXT NOT NULL, form TEXT NOT NULL, delivered_at TEXT NOT NULL
+        );
+        CREATE INDEX deliveries_by_memory ON memory_deliveries(memory_id, delivered_at);
+        CREATE TABLE memory_evidence (
+            memory_id INTEGER NOT NULL, source_session TEXT, turn_id TEXT NOT NULL,
+            role TEXT NOT NULL, excerpt TEXT NOT NULL
+        );
+        CREATE TABLE relevance_judgments (
+            id INTEGER PRIMARY KEY, memory_id INTEGER NOT NULL, session_id TEXT NOT NULL,
+            prompt TEXT NOT NULL, model TEXT NOT NULL, logit REAL NOT NULL, judged_at TEXT NOT NULL
+        );
+
+        INSERT INTO memories (id, kind, entity, title, body, created, updated, pinned, archived, class, archive_reason)
+        VALUES (7, 'observation', NULL, 'Prefers rebase', 'Rebase feature branches.', '2026-09-01T00:00:00Z',
+                '2026-09-02T00:00:00Z', 1, 0, 'preference', NULL),
+               (12, 'card', 'person:jason', 'Jason', 'Works on the iOS app.', '2026-09-03T00:00:00Z',
+                '2026-09-03T00:00:00Z', 0, 1, NULL, 'manual');
+        INSERT INTO links VALUES (7, 'Jason');
+        INSERT INTO embeddings VALUES (7, 'potion-base-8M', x'0000803f');
+        INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
+        VALUES (7, 's1', 'prompt', 'full', '2026-09-04T00:00:00Z'), (12, 's1', 'prompt', 'pointer', '2026-09-04T00:00:00Z');
+        INSERT INTO memory_evidence VALUES (7, 's1', 'N1', 'user', 'always rebase');
+        INSERT INTO relevance_judgments (memory_id, session_id, prompt, model, logit, judged_at)
+        VALUES (12, 's1', 'who does ios', 'ms-marco-MiniLM-L6-v2', 3.5, '2026-09-04T00:00:00Z');
+
+        PRAGMA user_version = 6;
+    ";
+
+    #[test]
+    fn counted_ids_migrate_to_global_ones_with_everything_still_attached() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(V6_STORE).unwrap();
+        let memory = Memory { connection };
+        memory.migrate().unwrap();
+
+        let ids = memory.ids().unwrap();
+        assert_eq!(ids.len(), 2);
+        let rebase = memory.portable(ids[0]).unwrap();
+        assert_eq!(rebase.title, "Prefers rebase");
+        assert_eq!(rebase.links, vec!["Jason"]);
+        assert_eq!(rebase.class.as_deref(), Some("preference"));
+        assert!(rebase.pinned);
+        assert_eq!(rebase.created, "2026-09-01T00:00:00Z");
+
+        let jason = memory.portable(ids[1]).unwrap();
+        assert!(jason.archived);
+        assert_eq!(jason.archive_reason.as_deref(), Some("manual"));
+
+        let attached = |table: &str, column: &str, id: Id| -> i64 {
+            memory
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"), [id], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(attached("embeddings", "memory_id", ids[0]), 1);
+        assert_eq!(attached("memory_deliveries", "memory_id", ids[0]), 1);
+        assert_eq!(attached("memory_deliveries", "memory_id", ids[1]), 1);
+        assert_eq!(attached("memory_evidence", "memory_id", ids[0]), 1);
+        assert_eq!(attached("relevance_judgments", "memory_id", ids[1]), 1);
+
+        let hits = crate::search::bm25(&memory, "rebase feature branches", 5).unwrap();
+        assert_eq!(hits.iter().map(|it| it.id).collect::<Vec<_>>(), vec![ids[0]]);
+
+        let added = observation_about(&memory, "person:jason", "Learned after the migration");
+        assert_eq!(memory.ids().unwrap(), vec![ids[0], ids[1], added]);
+    }
+
+    #[test]
+    fn a_typed_id_can_be_any_prefix_that_singles_one_memory_out() {
+        let memory = Memory::open_in_memory().unwrap();
+        let portable = |id: &str, title: &str| Portable {
+            id: Id::parse(id).unwrap(),
+            kind: Kind::Observation,
+            class: None,
+            entity: None,
+            title: title.into(),
+            body: "Body.".into(),
+            links: vec![],
+            pinned: false,
+            archived: false,
+            archive_reason: None,
+            created: "2026-09-01T00:00:00Z".into(),
+            updated: "2026-09-01T00:00:00Z".into(),
+        };
+        let first = memory.import(&portable("k7m2p9xq", "First")).unwrap();
+        let second = memory.import(&portable("k7zz0000", "Second")).unwrap();
+
+        assert_eq!(memory.resolve("k7m2p9xq").unwrap(), first);
+        assert_eq!(memory.resolve("k7m").unwrap(), first);
+        assert_eq!(memory.resolve("k7z").unwrap(), second);
+        assert!(memory.resolve("k7").unwrap_err().to_string().contains("several ids"));
+        assert!(memory.resolve("b").unwrap_err().to_string().contains("no memory with id"));
+        assert!(memory.resolve("k%").is_err());
+        assert!(memory.resolve("").is_err());
+    }
+
+    fn observation_about(memory: &Memory, entity: &str, title: &str) -> Id {
         memory
             .add(&NewMemory {
                 kind: Kind::Observation,

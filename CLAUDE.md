@@ -32,6 +32,10 @@ Relays and codex hooks also write into real config — sandbox those too with
   gates on `KATAMI_HOOK_SOCKET`, so it's inert outside a supervised session.
 - **`hook_client.rs`** is the thin relay claude and codex run; it formats the
   supervisor's canonical `{"context": …}` reply into each tool's hook shape.
+- **`id.rs`** is a memory's one id: 8 random base32 characters, first always a
+  letter, the same on every machine. The CLI resolves any unique prefix
+  (`Memory::resolve`). `memories.local_row` is only SQLite's rowid pinned down
+  for the FTS index and insertion order — never expose it or send it anywhere.
 - **`memory.rs`** is one SQLite store: observations, cards, status, links,
   deliveries, evidence, the review queue. Schema changes bump `user_version`
   and add a migration step — see `migrate()`.

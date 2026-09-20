@@ -56,13 +56,13 @@ Run `katami` with no command to see the help. The rest are subcommands:
 katami memory list                        # what it has learned
 katami memory search "deploy process"     # hybrid BM25 + semantic search
 katami memory judge "fix the deploy"      # what that prompt would get injected, and what wouldn't
-katami memory show 12                     # one memory with its [[links]]
+katami memory show k7m                    # one memory with its [[links]]; any unique start of its id will do
 katami memory add "Title" "The fact." --entity project:/path
 katami memory pull-models                 # enable semantic search and relevance judging (~120MB, once)
 katami memory curate                      # consolidate and retire now
 
 katami memory export all                  # every memory → katami-memories-<date>.zip
-katami memory export 12,45 --to ~/pair.zip   # or one id, or a few
+katami memory export k7m,b3x --to ~/pair.zip   # or one id, or a few
 katami memory import ~/pair.zip           # memories already here are kept and reported
 katami memory import ~/pair.zip --replace # …or the zip's copy wins
 katami memory import ~/pair.zip --merge   # …or haiku writes one memory out of the two
@@ -140,9 +140,9 @@ Two tool-specific notes:
   kind, class, entity, links, pin and archive state, and dates in a
   frontmatter block, then `# Title` and the body. Unzip it, fix what needs
   fixing — a project path that differs on the other machine, say — zip it
-  back up, and import. Only the memory itself travels: ids, embeddings,
-  evidence, and delivery history stay behind, and embeddings are rebuilt on
-  arrival. A bundle lands in one transaction or not at all, and importing the
+  back up, and import. Only the memory itself travels, under the id it has
+  everywhere: embeddings, evidence, and delivery history stay behind, and
+  embeddings are rebuilt on arrival. A bundle lands in one transaction or not at all, and importing the
   same one twice changes nothing.
 
 ## Building
