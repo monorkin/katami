@@ -48,7 +48,7 @@ pub fn bm25(memory: &Memory, query: &str, limit: usize) -> Result<Vec<Hit>> {
     let mut statement = memory.connection.prepare(
         "SELECT m.id, bm25(memories_fts) FROM memories_fts f
          JOIN memories m ON m.local_row = f.rowid
-         WHERE memories_fts MATCH ?1 AND m.archived = 0 AND m.kind != 'status'
+         WHERE memories_fts MATCH ?1 AND m.archived = 0 AND m.kind IN ('observation', 'card')
          ORDER BY bm25(memories_fts) LIMIT ?2",
     )?;
     let rows = statement.query_map(rusqlite::params![sanitized, limit as i64], |row| {

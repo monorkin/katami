@@ -52,6 +52,7 @@ pub enum Kind {
     Observation,
     Card,
     Status,
+    Skill,
 }
 
 impl Kind {
@@ -60,6 +61,7 @@ impl Kind {
             "observation" => Some(Kind::Observation),
             "card" => Some(Kind::Card),
             "status" => Some(Kind::Status),
+            "skill" => Some(Kind::Skill),
             _ => None,
         }
     }
@@ -69,7 +71,16 @@ impl Kind {
             Kind::Observation => "observation",
             Kind::Card => "card",
             Kind::Status => "status",
+            Kind::Skill => "skill",
         }
+    }
+
+    /// Whether a prompt can bring this kind up. A status belongs to its own
+    /// project's session start and a skill to the tool's skill list, so
+    /// neither is searched or embedded. The queries spell this out as
+    /// `kind IN ('observation', 'card')`.
+    pub fn is_searched(self) -> bool {
+        matches!(self, Kind::Observation | Kind::Card)
     }
 }
 
@@ -85,6 +96,7 @@ impl rusqlite::types::FromSql for Kind {
             "observation" => Ok(Kind::Observation),
             "card" => Ok(Kind::Card),
             "status" => Ok(Kind::Status),
+            "skill" => Ok(Kind::Skill),
             other => Err(rusqlite::types::FromSqlError::Other(
                 format!("unknown memory kind '{other}'").into(),
             )),
@@ -708,6 +720,7 @@ impl Memory {
             "INSERT INTO sync_clock (node, seq) VALUES (?1, 0)",
             [Id::generate()],
         )?;
+        self.move_skills_into_memories()?;
         self.connection.execute_batch(
             "
             UPDATE memories
@@ -723,6 +736,42 @@ impl Memory {
         )?;
         self.connection.execute_batch(STAMP_TRIGGERS)?;
         self.connection.execute_batch("PRAGMA user_version = 8;")?;
+        Ok(())
+    }
+
+    /// Skills had a table of their own, which would have needed a second copy
+    /// of everything that makes memories shareable. They move in as memories
+    /// before the stamping, so they're stamped with the rest.
+    fn move_skills_into_memories(&self) -> Result<()> {
+        let skills = self
+            .connection
+            .prepare("SELECT name, description, instructions, created, archived FROM generated_skills ORDER BY created")?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for (name, description, instructions, created, archived) in skills {
+            self.connection.execute(
+                "INSERT INTO memories (id, kind, title, body, created, updated, archived, archive_reason)
+                 VALUES (?1, 'skill', ?2, ?3, ?4, ?4, ?5, ?6)",
+                rusqlite::params![
+                    Id::generate(),
+                    name,
+                    format!("{}\n\n{}", description.trim(), instructions.trim()),
+                    created,
+                    archived,
+                    archived.then_some("unused"),
+                ],
+            )?;
+        }
+        self.connection.execute_batch("DROP TABLE generated_skills;")?;
         Ok(())
     }
 
@@ -871,7 +920,7 @@ impl Memory {
         let mut statement = self.connection.prepare(
             "SELECT e.memory_id, e.vector FROM embeddings e
              JOIN memories m ON m.id = e.memory_id
-             WHERE e.model = ?1 AND m.archived = 0 AND m.kind != 'status'",
+             WHERE e.model = ?1 AND m.archived = 0 AND m.kind IN ('observation', 'card')",
         )?;
         let rows = statement.query_map([model], |row| {
             let id: Id = row.get(0)?;
@@ -1260,7 +1309,7 @@ impl Memory {
     /// versions stay behind as archived rows.
     pub fn twins_of(&self, portable: &Portable) -> Result<Vec<Id>> {
         let (title_matters, title) = match portable.kind {
-            Kind::Observation => (true, portable.title.as_str()),
+            Kind::Observation | Kind::Skill => (true, portable.title.as_str()),
             Kind::Card | Kind::Status => (false, ""),
         };
         let mut statement = self.connection.prepare(
@@ -1322,7 +1371,7 @@ impl Memory {
         let mut statement = self.connection.prepare(
             "SELECT m.id, m.title || char(10) || m.body FROM memories m
              LEFT JOIN embeddings e ON e.memory_id = m.id AND e.model = ?1
-             WHERE m.archived = 0 AND m.kind != 'status' AND e.memory_id IS NULL",
+             WHERE m.archived = 0 AND m.kind IN ('observation', 'card') AND e.memory_id IS NULL",
         )?;
         let rows = statement.query_map([model], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1462,36 +1511,62 @@ impl Memory {
             .flatten())
     }
 
+    /// A skill is a memory like any other — titled with its name, its body
+    /// the one-line description, a blank line, then the instructions — so it
+    /// is versioned, shared, merged, exported, and edited like the rest.
+    /// Proposing a name that already exists rewrites that skill and brings
+    /// it back if it had been retired.
     pub fn add_generated_skill(&self, name: &str, description: &str, instructions: &str) -> Result<()> {
-        self.connection.execute(
-            "INSERT INTO generated_skills (name, description, instructions, created) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (name) DO UPDATE SET description = ?2, instructions = ?3, archived = 0",
-            rusqlite::params![name, description, instructions, timestamp()],
-        )?;
+        let body = format!("{}\n\n{}", description.trim(), instructions.trim());
+        if let Some(id) = self.skill_id(name)? {
+            self.connection.execute(
+                "UPDATE memories SET body = ?2, archived = 0, archive_reason = NULL, updated = ?3 WHERE id = ?1",
+                rusqlite::params![id, body, timestamp()],
+            )?;
+        } else {
+            self.add(&NewMemory {
+                kind: Kind::Skill,
+                entity: None,
+                title: name.to_string(),
+                body,
+                links: Vec::new(),
+                source_session: None,
+                class: None,
+            })?;
+        }
         Ok(())
     }
 
     pub fn generated_skills(&self) -> Result<Vec<GeneratedSkill>> {
         let mut statement = self.connection.prepare(
-            "SELECT name, description, instructions, created FROM generated_skills WHERE archived = 0",
+            "SELECT title, body, created FROM memories WHERE kind = 'skill' AND archived = 0 ORDER BY local_row",
         )?;
         let rows = statement.query_map([], |row| {
+            let body: String = row.get(1)?;
+            let (description, instructions) = body.split_once("\n\n").unwrap_or((body.as_str(), ""));
             Ok(GeneratedSkill {
                 name: row.get(0)?,
-                description: row.get(1)?,
-                instructions: row.get(2)?,
-                created: row.get(3)?,
+                description: description.trim().to_string(),
+                instructions: instructions.trim().to_string(),
+                created: row.get(2)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn archive_generated_skill(&self, name: &str) -> Result<()> {
-        self.connection.execute(
-            "UPDATE generated_skills SET archived = 1 WHERE name = ?1",
-            [name],
-        )?;
+        if let Some(id) = self.skill_id(name)? {
+            self.archive(id, "unused")?;
+        }
         Ok(())
+    }
+
+    fn skill_id(&self, name: &str) -> Result<Option<Id>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM memories WHERE kind = 'skill' AND title = ?1 ORDER BY archived, local_row LIMIT 1",
+        )?;
+        let mut rows = statement.query_map([name], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
     }
 
     pub fn state(&self, key: &str) -> Result<Option<String>> {
@@ -1701,6 +1776,14 @@ mod tests {
                 '2026-09-02T00:00:00Z', 1, 0, 'preference', NULL),
                (12, 'card', 'person:jason', 'Jason', 'Works on the iOS app.', '2026-09-03T00:00:00Z',
                 '2026-09-03T00:00:00Z', 0, 1, NULL, 'manual');
+        CREATE TABLE generated_skills (
+            name TEXT PRIMARY KEY, description TEXT NOT NULL, instructions TEXT NOT NULL,
+            created TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO generated_skills VALUES
+            ('deploy-check', 'Verify a deploy', '1. Check the logs.', '2026-09-05T00:00:00Z', 0),
+            ('old-habit', 'No longer done', '1. Nothing.', '2026-09-04T00:00:00Z', 1);
+
         INSERT INTO links VALUES (7, 'Jason');
         INSERT INTO embeddings VALUES (7, 'potion-base-8M', x'0000803f');
         INSERT INTO memory_deliveries (memory_id, session_id, event, form, delivered_at)
@@ -1720,7 +1803,7 @@ mod tests {
         memory.migrate().unwrap();
 
         let ids = memory.ids().unwrap();
-        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.len(), 4);
         let rebase = memory.portable(ids[0]).unwrap();
         assert_eq!(rebase.title, "Prefers rebase");
         assert_eq!(rebase.links, vec!["Jason"]);
@@ -1747,8 +1830,38 @@ mod tests {
         let hits = crate::search::bm25(&memory, "rebase feature branches", 5).unwrap();
         assert_eq!(hits.iter().map(|it| it.id).collect::<Vec<_>>(), vec![ids[0]]);
 
+        let skills = memory.generated_skills().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(
+            (skills[0].name.as_str(), skills[0].description.as_str(), skills[0].instructions.as_str()),
+            ("deploy-check", "Verify a deploy", "1. Check the logs.")
+        );
+        let retired = memory.portable(ids[2]).unwrap();
+        assert_eq!((retired.kind, retired.title.as_str(), retired.archived), (Kind::Skill, "old-habit", true));
+
         let added = observation_about(&memory, "person:jason", "Learned after the migration");
-        assert_eq!(memory.ids().unwrap(), vec![ids[0], ids[1], added]);
+        assert_eq!(memory.ids().unwrap(), vec![ids[0], ids[1], ids[2], ids[3], added]);
+    }
+
+    #[test]
+    fn skills_are_memories_that_prompts_never_bring_up() {
+        let memory = Memory::open_in_memory().unwrap();
+        memory.add_generated_skill("deploy-check", "Verify a deploy", "1. Check the logs.\n\n2. Check the dashboard.").unwrap();
+
+        let skills = memory.generated_skills().unwrap();
+        assert_eq!(skills[0].description, "Verify a deploy");
+        assert_eq!(skills[0].instructions, "1. Check the logs.\n\n2. Check the dashboard.");
+        assert!(crate::search::bm25(&memory, "verify the deploy logs dashboard", 5).unwrap().is_empty());
+        assert!(memory.unembedded("any-model").unwrap().is_empty());
+
+        memory.archive_generated_skill("deploy-check").unwrap();
+        assert!(memory.generated_skills().unwrap().is_empty());
+
+        memory.add_generated_skill("deploy-check", "Verify a deploy", "1. Ask the mini.").unwrap();
+        let revived = memory.generated_skills().unwrap();
+        assert_eq!(revived.len(), 1);
+        assert_eq!(revived[0].instructions, "1. Ask the mini.");
+        assert_eq!(memory.ids().unwrap().len(), 1);
     }
 
     #[test]

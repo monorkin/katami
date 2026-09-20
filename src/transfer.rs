@@ -135,7 +135,7 @@ pub fn import(path: &Path, on_collision: OnCollision, config_dir: &Path) -> Resu
 pub fn refresh_derived(memory: &Memory, ids: &[Id]) -> Result<()> {
     for id in ids {
         let stored = memory.get(*id)?;
-        if stored.kind != Kind::Status {
+        if stored.kind.is_searched() {
             embeddings::embed_into(memory, *id, &format!("{}\n{}", stored.title, stored.body))?;
         }
         if stored.kind == Kind::Card

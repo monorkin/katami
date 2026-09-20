@@ -192,7 +192,7 @@ enum MemoryCommand {
         /// Show only archived memories
         #[usage(long)]
         archived: bool,
-        /// Show only these kinds, comma-separated: observation, card, status
+        /// Show only these kinds, comma-separated: observation, card, status, skill
         #[usage(long)]
         kinds: Option<String>,
         /// Order by these columns, comma-separated, each optionally followed by asc or desc: "last_used desc, uses desc"

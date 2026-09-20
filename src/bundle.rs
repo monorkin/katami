@@ -166,7 +166,7 @@ pub fn from_markdown(text: &str) -> Result<Portable> {
             "kind" => {
                 kind = Some(
                     Kind::parse(value)
-                        .with_context(|| format!("unknown kind `{value}` — it's observation, card, or status"))?,
+                        .with_context(|| format!("unknown kind `{value}` — it's observation, card, status, or skill"))?,
                 )
             }
             "class" => {

@@ -169,7 +169,7 @@ fn parse_kinds(text: &str) -> Result<Vec<Kind>> {
         .filter(|it| !it.is_empty())
         .map(|name| {
             Kind::parse(name)
-                .with_context(|| format!("unknown kind '{name}' — expected observation, card, or status"))
+                .with_context(|| format!("unknown kind '{name}' — expected observation, card, status, or skill"))
         })
         .collect()
 }
@@ -333,7 +333,8 @@ mod tests {
     fn kinds_are_parsed_from_a_comma_list() {
         assert_eq!(parse_kinds("card, status").unwrap(), vec![Kind::Card, Kind::Status]);
         assert!(parse_kinds("").unwrap().is_empty());
-        assert!(parse_kinds("skill").is_err());
+        assert_eq!(parse_kinds("skill").unwrap(), vec![Kind::Skill]);
+        assert!(parse_kinds("vibe").is_err());
     }
 
     #[test]
