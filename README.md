@@ -67,6 +67,13 @@ katami memory import ~/pair.zip           # memories already here are kept and r
 katami memory import ~/pair.zip --replace # …or the zip's copy wins
 katami memory import ~/pair.zip --merge   # …or haiku writes one memory out of the two
 
+katami link mini                          # share memory with another of your machines, over Tailscale
+katami link                               # who's linked, who's asking to pair, what's waiting to merge
+katami link --accept K7M2-P9XQ            # let in a machine that isn't yours by Tailscale's word
+katami link --remove mini                 # take a machine out of the mesh, everywhere
+katami link --serve                       # listen for other machines without a session running
+katami memory sync                        # sync with every reachable machine and merge conflicts, now
+
 katami log -f                             # watch what the supervisor is doing
 katami relays install                     # (re)install the codex/pi/opencode relays
 katami relays status                      # show each relay's state
@@ -136,6 +143,31 @@ Two tool-specific notes:
   `katami-<name>` entries in the claude config dir's `skills/` before each
   launch, and their usage is tracked through the PostToolUse hook to inform
   curation. A skills dir that's a symlink to shared territory is left alone.
+- **The mesh.** `katami link <hostname|ip>` puts this machine's memory in a
+  mesh with your others. There is no server: every machine holds everything,
+  any two can sync, and each passes on what it picked up elsewhere — so a
+  memory learned on the laptop reaches the mini PC through the desktop, and a
+  machine that's off holds nobody up. Peers introduce each other, so a third
+  machine only needs linking to one of the first two. The supervisor listens
+  on this machine's Tailscale address while a session runs and syncs every few
+  minutes; the reviewer and curator sync when they finish. Memories move
+  whenever two machines are in use around the same time, or through any
+  machine that's always in a session.
+  - *Trust.* A device owned by the same Tailscale user is one of your
+    machines and is trusted on sight. Anyone else's — tailnets are often
+    shared — has to be paired: it shows a code, and nothing is exchanged until
+    someone runs `katami link --accept <code>` on the other machine.
+  - *Conflicts.* Every write is stamped with a version vector, so a store can
+    tell a newer version from one written at the same time on another machine.
+    Simultaneous edits are never settled by picking a winner: both are kept,
+    and after the next session haiku writes the one memory that says what each
+    said. `katami memory sync` does it on the spot.
+  - *One curator.* A lease in shared state says which machine folds cards and
+    retires memories; it lapses when its holder is away, so the job follows
+    whoever is awake. Each machine marks the day it last delivered a memory and
+    the marks are pooled, so nothing is retired for going unused on a machine
+    that never works on that project.
+  - The port is 5282, or `mesh_port` in `~/.local/share/katami/config.json`.
 - **Export and import.** A bundle is a zip with one markdown file per memory:
   kind, class, entity, links, pin and archive state, and dates in a
   frontmatter block, then `# Title` and the body. Unzip it, fix what needs

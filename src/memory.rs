@@ -520,8 +520,30 @@ impl Memory {
         connection.busy_timeout(std::time::Duration::from_millis(2000))?;
 
         let memory = Memory { connection, directory: Some(directory.to_path_buf()) };
+        memory.snapshot_before_global_ids(directory)?;
         memory.migrate()?;
         Ok(memory)
+    }
+
+    /// Re-identifying every memory rewrites every table that points at one,
+    /// and there's no walking it back, so the store as it was is kept beside
+    /// the new one. Two processes can open an old store at once; each writes
+    /// its own copy and the first to finish keeps the name.
+    fn snapshot_before_global_ids(&self, directory: &Path) -> Result<()> {
+        let snapshot = directory.join("store-before-global-ids.db");
+        if (1..7).contains(&self.schema_version()?) && !snapshot.exists() {
+            let scratch = directory.join(format!("store-before-global-ids.{}.tmp", std::process::id()));
+            let _ = std::fs::remove_file(&scratch);
+            self.connection
+                .execute("VACUUM INTO ?1", [scratch.to_string_lossy()])
+                .context("could not snapshot the store before migrating it — is the disk full?")?;
+            if snapshot.exists() {
+                std::fs::remove_file(&scratch)?;
+            } else {
+                std::fs::rename(&scratch, &snapshot)?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]

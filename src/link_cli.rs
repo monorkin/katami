@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::memory::Memory;
+use crate::merger;
 use crate::mesh::{self, Exchange, Reply};
 use crate::paths;
 use crate::peers::{self, Peer};
@@ -85,7 +86,7 @@ pub fn status() -> Result<()> {
 
     let conflicted = memory.conflicted_ids()?.len();
     if conflicted > 0 {
-        println!("\n{conflicted} memories changed on two machines at once and are waiting to be merged — `katami memory curate` does it now.");
+        println!("\n{conflicted} memories changed on two machines at once and are waiting to be merged — it happens after the next session, or now with `katami memory sync`.");
     }
     Ok(())
 }
@@ -108,8 +109,27 @@ pub fn sync() -> Result<()> {
     if exchanges.is_empty() {
         println!("No peer could be reached — see `katami log` for why, and `katami link` for who they are.");
     }
-    for exchange in exchanges {
-        println!("{}", capitalize(&mesh::describe(&exchange)));
+    for exchange in &exchanges {
+        println!("{}", capitalize(&mesh::describe(exchange)));
+    }
+    settle_conflicts()
+}
+
+/// Asking for a sync means wanting to end up level, so conflicts are merged
+/// on the spot and the merges sent straight back out.
+fn settle_conflicts() -> Result<()> {
+    let waiting = open()?.conflicted_ids()?.len();
+    if waiting > 0 {
+        println!("Merging {waiting} memories that changed on two machines at once…");
+        merger::run(&paths::claude_config_home())?;
+
+        let left = open()?.conflicted_ids()?.len();
+        if left > 0 {
+            println!("{left} could not be merged yet — see `katami log`.");
+        }
+        for exchange in mesh::sync_all()? {
+            println!("{}", capitalize(&mesh::describe(&exchange)));
+        }
     }
     Ok(())
 }

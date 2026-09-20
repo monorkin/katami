@@ -57,11 +57,11 @@ pub fn search(query: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<8}{:<10}  {:<11}  title", "id", "updated", "kind");
+    println!("{:<8}  {:<10}  {:<11}  title", "id", "updated", "kind");
     for hit in hits {
         let stored = memory.get(hit.id)?;
         println!(
-            "{:<8}{:<10}  {:<11}  {}",
+            "{:<8}  {:<10}  {:<11}  {}",
             stored.id,
             &stored.updated[..10],
             stored.kind,
@@ -81,7 +81,7 @@ pub fn judge(prompt: &str) -> Result<()> {
     let mut judgments = selection.judgments;
     judgments.sort_by(|a, b| b.logit.total_cmp(&a.logit));
 
-    println!("{:<8}{:>6}  {:<8}  title", "id", "logit", "verdict");
+    println!("{:<8}  {:>6}  {:<8}  title", "id", "logit", "verdict");
     for judgment in judgments {
         let verdict = if selection.hits.iter().any(|it| it.id == judgment.memory_id) {
             "injected"
@@ -89,7 +89,7 @@ pub fn judge(prompt: &str) -> Result<()> {
             "skipped"
         };
         println!(
-            "{:<8}{:>6.1}  {:<8}  {}",
+            "{:<8}  {:>6.1}  {:<8}  {}",
             judgment.memory_id,
             judgment.logit,
             verdict,
@@ -137,7 +137,7 @@ pub fn list(filter: ListFilter, kinds: Option<&str>, sort_by: Option<&str>) -> R
     }
 
     println!(
-        "{:<8}{:<10}  {:<11}  {:>5}  {:<10}  title",
+        "{:<8}  {:<10}  {:<11}  {:>5}  {:<10}  title",
         "id", "updated", "kind", "uses", "last used"
     );
     for row in rows {
@@ -153,7 +153,7 @@ pub fn list(filter: ListFilter, kinds: Option<&str>, sort_by: Option<&str>) -> R
             None => "never",
         };
         println!(
-            "{:<8}{:<10}  {:<11}  {:>5}  {last_used:<10}  {title}",
+            "{:<8}  {:<10}  {:<11}  {:>5}  {last_used:<10}  {title}",
             row.stored.id,
             &row.stored.updated[..10],
             row.stored.kind,

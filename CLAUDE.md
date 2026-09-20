@@ -61,6 +61,32 @@ Relays and codex hooks also write into real config — sandbox those too with
   filters katami's own injected context so the store never eats its output.
 - **`curator.rs`** consolidates observations into cards and retires unused
   skills, at most once a day.
+- **The mesh** shares memory between machines with no server, in layers:
+  - **`version.rs`** — version vectors: newer, older, same, or concurrent.
+  - **`replica.rs`** — what a store knows and what it does with arrivals.
+    Every write gets a dot (node + clock tick) **from SQLite triggers**
+    (`STAMP_TRIGGERS` in `memory.rs`), so no write path can forget; a write
+    from a peer carries its own dot and the triggers skip any update that
+    changes the dot. `delta_for(knowledge)` is everything a peer hasn't caught
+    up with, relayed writes and unmerged siblings included. Concurrent
+    versions become `memory_siblings`, never a last-writer-wins.
+  - **`merger.rs`** — haiku merges siblings after a session (reviewer,
+    curator, `memory sync`), never on a hook or inside a sync.
+  - **`mesh.rs`** — the wire (newline-delimited JSON over TCP, one connection
+    = hello → pull → push), admission, and the supervisor's listener + 5-minute
+    sync loop. **`peers.rs`** is the gossiped peer list and pairing codes;
+    **`tailscale.rs`** is trust: same Tailscale user ⇒ admitted, anyone else
+    must be paired. **`shared.rs`** is the curator lease and pooled usage
+    marks. **`link_cli.rs`** is `katami link`.
+  - Only memories, links, pin/archive state, peers, the lease, and usage marks
+    travel. Embeddings, evidence, deliveries, judgments, aliases, the review
+    queue, and generated skills are per machine.
+  - To try it in a sandbox, give each `XDG_DATA_HOME` its own
+    `katami/config.json` with a distinct `mesh_port` and run
+    `katami link --serve` in each; they bind this machine's Tailscale IP and
+    trust each other on sight. `KATAMI_MESH_LISTEN=127.0.0.1:<port>` binds
+    loopback instead, which Tailscale doesn't vouch for, so it exercises
+    pairing.
 - **`transfer.rs`** is `memory export`/`import`; **`bundle.rs`** is the format
   (a zip of markdown files with flat `key: value` frontmatter, no YAML crate).
   `memory::Portable` is what travels. Import decides everything first —
@@ -100,7 +126,7 @@ rustc.
 
 `katami <tool> …` supervises whatever follows — the first word picks the
 adapter (`katami claude`, `katami codex`, `katami ax --account x -- …`). Bare
-`katami` prints help. Reserved subcommands (`memory`, `log`, `relays`,
+`katami` prints help. Reserved subcommands (`memory`, `link`, `log`, `relays`,
 `setup`, `upgrade`, `hook`, `review`, `curate`, `shell-completion`) are listed
 in `SUBCOMMANDS` in `main.rs`; anything else in the first position is a
 launcher.
