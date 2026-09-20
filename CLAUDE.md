@@ -76,11 +76,20 @@ Relays and codex hooks also write into real config — sandbox those too with
     = hello → pull → push), admission, and the supervisor's listener + 5-minute
     sync loop. **`peers.rs`** is the gossiped peer list and pairing codes;
     **`tailscale.rs`** is trust: same Tailscale user ⇒ admitted, anyone else
-    must be paired. **`shared.rs`** is the curator lease and pooled usage
-    marks. **`link_cli.rs`** is `katami link`.
-  - Only memories, links, pin/archive state, peers, the lease, and usage marks
-    travel. Embeddings, evidence, deliveries, judgments, aliases, the review
-    queue, and generated skills are per machine.
+    must be paired. **`shared.rs`** is the curator lease. **`link_cli.rs`** is
+    `katami link up|break|accept|status`, `katami serve`, and `memory sync`.
+  - Three things travel, each the cheapest way that's safe for it:
+    **memories** (every kind — a generated skill is `Kind::Skill`, not a table
+    of its own) as versioned records; the **logs** (`memory_deliveries`,
+    `relevance_judgments`, `memory_evidence`, `usage`) as write-once rows with
+    dots from the same clock, listed in `LOGS` in `replica.rs` — add a log
+    there and give it dot columns plus a stamp trigger; and **gossip** (peers,
+    the lease, remote-to-remote renames, root commits), small and
+    last-writer-wins.
+  - Deliberately per machine: cursors and the review queue (they point at
+    local files), path aliases (the same folder can be a different repository
+    elsewhere — sharing them would re-home memories into the wrong project),
+    and embeddings (derived identically everywhere, rebuilt on arrival).
   - To try it in a sandbox, give each `XDG_DATA_HOME` its own
     `katami/config.json` with a distinct `mesh_port` and run
     `katami serve` in each; they bind this machine's Tailscale IP and

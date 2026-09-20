@@ -143,6 +143,11 @@ Two tool-specific notes:
   `katami-<name>` entries in the claude config dir's `skills/` before each
   launch, and their usage is tracked through the PostToolUse hook to inform
   curation. A skills dir that's a symlink to shared territory is left alone.
+  A skill is a memory of kind `skill` — titled with its name, its body the
+  one-line description, a blank line, then the instructions — so
+  `katami memory list --kinds skill` shows them, `katami memory edit` changes
+  them, and they're shared, merged, and exported like the rest. No prompt
+  ever brings one up; the tool's own skill list does that.
 - **The mesh.** `katami link up <hostname|ip>` puts this machine's memory in a
   mesh with your others. There is no server: every machine holds everything,
   any two can sync, and each passes on what it picked up elsewhere — so a
@@ -162,11 +167,19 @@ Two tool-specific notes:
     Simultaneous edits are never settled by picking a winner: both are kept,
     and after the next session haiku writes the one memory that says what each
     said. `katami memory sync` does it on the spot.
+  - *What's shared.* Everything katami learns: memories of every kind, skills
+    included, with their links and pin and archive state; the logs of when
+    each was delivered, how the reranker judged it, which turns of a
+    conversation it came from, and when a skill got used; and project renames.
+    What stays put is what only means something here — transcript cursors and
+    the review queue, which point at local files, path aliases, since the same
+    folder can hold a different repository on the next machine, and
+    embeddings, which every machine derives identically from the text in
+    microseconds.
   - *One curator.* A lease in shared state says which machine folds cards and
     retires memories; it lapses when its holder is away, so the job follows
-    whoever is awake. Each machine marks the day it last delivered a memory and
-    the marks are pooled, so nothing is retired for going unused on a machine
-    that never works on that project.
+    whoever is awake. Because delivery logs are shared, a memory is only
+    retired for disuse if no machine has used it.
   - The port is 5282, or `mesh_port` in `~/.local/share/katami/config.json`.
 - **Export and import.** A bundle is a zip with one markdown file per memory:
   kind, class, entity, links, pin and archive state, and dates in a
