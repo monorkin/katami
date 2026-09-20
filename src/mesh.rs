@@ -166,7 +166,7 @@ fn sync_with_peer(memory: &Memory, peer: &Peer) -> Result<Reply> {
     if peer.token.is_some() || trusted_by_tailscale(address.ip()) {
         sync_with(memory, &peer.address, peer.token.as_deref(), None)
     } else {
-        bail!("it isn't one of your machines by Tailscale's word and was never paired — run `katami link {}`", peer.address)
+        bail!("it isn't one of your machines by Tailscale's word and was never paired — run `katami link up {}`", peer.address)
     }
 }
 
@@ -244,7 +244,7 @@ pub fn port() -> u16 {
 }
 
 /// `host`, `host:port`, or an address — a bare host is looked up on the
-/// tailnet first, so `katami link mini` works without MagicDNS.
+/// tailnet first, so `katami link up mini` works without MagicDNS.
 pub fn resolve(address: &str) -> Result<SocketAddr> {
     if let Ok(exact) = address.parse::<SocketAddr>() {
         return Ok(exact);
@@ -344,14 +344,14 @@ fn admit(memory: &Memory, hello: &Hello, remote: IpAddr) -> Result<Message> {
     } else if hello.node == memory.node()? {
         Ok(refused("that is this very store — link a different machine"))
     } else if memory.was_removed(hello.node)? {
-        Ok(refused("this machine was removed from the mesh — run `katami link` from the machine that removed it to bring it back"))
+        Ok(refused("this machine was removed from the mesh — run `katami link up` from the machine that removed it to bring it back"))
     } else if trusted_by_tailscale(remote) || holds_token(memory, hello)? {
         memory.remember_peer(hello.node, &hello.name, &address, None)?;
         Ok(welcome)
     } else if let Some(code) = &hello.pairing_code {
         pair(memory, hello, code, &address)
     } else {
-        Ok(refused("the caller isn't one of this person's machines by Tailscale's word, and isn't paired — run `katami link` toward this machine to pair it"))
+        Ok(refused("the caller isn't one of this person's machines by Tailscale's word, and isn't paired — run `katami link up` toward this machine to pair it"))
     }
 }
 
@@ -378,7 +378,7 @@ fn pair(memory: &Memory, hello: &Hello, code: &str, address: &str) -> Result<Mes
         None => {
             if memory.pending_pairings()?.len() < PENDING_PAIRINGS_LIMIT {
                 memory.request_pairing(code, hello.node, &hello.name, address)?;
-                log(&format!("{} at {address} asks to pair — accept with `katami link --accept <the code it shows>`", hello.name));
+                log(&format!("{} at {address} asks to pair — accept with `katami link accept <the code it shows>`", hello.name));
             }
             Ok(Message::PairingPending)
         }

@@ -20,7 +20,7 @@ use crate::peers::{self, Peer};
 const PAIRING_POLL: Duration = Duration::from_secs(3);
 const PAIRING_ATTEMPTS: usize = 100;
 
-pub fn link(host: &str) -> Result<()> {
+pub fn up(host: &str) -> Result<()> {
     let memory = open()?;
     let address = mesh::resolve(host)?;
     let known = memory.peers()?.into_iter().find(|it| it.address == address.to_string());
@@ -29,7 +29,7 @@ pub fn link(host: &str) -> Result<()> {
     if token.is_some() || mesh::trusted_by_tailscale(address.ip()) {
         match mesh::sync_with(&memory, host, token.as_deref(), None)? {
             Reply::Synced(exchange) => linked(&memory, &exchange),
-            Reply::PairingPending => bail!("{host} wants to be paired again — run `katami link --remove {host}` and link it afresh"),
+            Reply::PairingPending => bail!("{host} wants to be paired again — run `katami link break {host}` and link it up afresh"),
         }
     } else {
         pair(&memory, host)
@@ -45,7 +45,7 @@ pub fn accept(code: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn remove(name: &str) -> Result<()> {
+pub fn break_with(name: &str) -> Result<()> {
     let memory = open()?;
     let peer = find(&memory, name)?;
     memory.remove_peer(peer.node)?;
@@ -62,7 +62,7 @@ pub fn status() -> Result<()> {
 
     let peers = memory.peers()?;
     if peers.is_empty() {
-        println!("Not linked to any machine yet — `katami link <hostname|ip>` links it to one, and that one introduces the rest.");
+        println!("Not linked to any machine yet — `katami link up <hostname|ip>` links it to one, and that one introduces the rest.");
     } else {
         println!("\n{:<20}  {:<24}  {:<10}  last synced", "machine", "address", "trusted by");
         for peer in &peers {
@@ -78,7 +78,7 @@ pub fn status() -> Result<()> {
 
     let pending = memory.pending_pairings()?;
     if !pending.is_empty() {
-        println!("\nAsking to pair — accept one with `katami link --accept <the code it shows>`:");
+        println!("\nAsking to pair — accept one with `katami link accept <the code it shows>`:");
         for pairing in pending {
             println!("  {} ({})", pairing.name, pairing.address);
         }
@@ -102,12 +102,12 @@ pub fn serve() -> Result<()> {
 
 pub fn sync() -> Result<()> {
     if open()?.peers()?.is_empty() {
-        bail!("not linked to any machine yet — run `katami link <hostname|ip>`");
+        bail!("not linked to any machine yet — run `katami link up <hostname|ip>`");
     }
 
     let exchanges = mesh::sync_all()?;
     if exchanges.is_empty() {
-        println!("No peer could be reached — see `katami log` for why, and `katami link` for who they are.");
+        println!("No peer could be reached — see `katami log` for why, and `katami link status` for who they are.");
     }
     for exchange in &exchanges {
         println!("{}", capitalize(&mesh::describe(exchange)));
@@ -137,7 +137,7 @@ fn settle_conflicts() -> Result<()> {
 fn pair(memory: &Memory, host: &str) -> Result<()> {
     let code = peers::new_pairing_code();
     println!("{host} isn't one of your machines by Tailscale's word, so it has to be paired.");
-    println!("On {host}, run:\n\n    katami link --accept {code}\n\nWaiting for that…");
+    println!("On {host}, run:\n\n    katami link accept {code}\n\nWaiting for that…");
 
     for _ in 0..PAIRING_ATTEMPTS {
         if let Reply::Synced(exchange) = mesh::sync_with(memory, host, None, Some(&code))? {
@@ -145,7 +145,7 @@ fn pair(memory: &Memory, host: &str) -> Result<()> {
         }
         thread::sleep(PAIRING_POLL);
     }
-    bail!("nobody accepted {code} on {host} — run `katami link {host}` again when you're at it")
+    bail!("nobody accepted {code} on {host} — run `katami link up {host}` again when you're at it")
 }
 
 fn linked(memory: &Memory, exchange: &Exchange) -> Result<()> {
@@ -169,7 +169,7 @@ fn find(memory: &Memory, name: &str) -> Result<Peer> {
         .peers()?
         .into_iter()
         .find(|it| it.name.eq_ignore_ascii_case(name) || it.node.as_str() == name || Some(&it.address) == address.as_ref())
-        .with_context(|| format!("no linked machine called {name} — see `katami link` for the ones there are"))
+        .with_context(|| format!("no linked machine called {name} — see `katami link status` for the ones there are"))
 }
 
 fn trust_of(peer: &Peer) -> &'static str {

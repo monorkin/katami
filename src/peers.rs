@@ -145,7 +145,7 @@ impl Memory {
         let code = normalize_code(code);
         let pairing = self
             .pairing(&code)?
-            .with_context(|| format!("nobody has asked to pair with code {code} — run `katami link <this machine>` on the other one first"))?;
+            .with_context(|| format!("nobody has asked to pair with code {code} — run `katami link up <this machine>` on the other one first"))?;
         if pairing.token.is_some() {
             bail!("{} was already accepted — it finishes pairing the next time it connects", pairing.name);
         }

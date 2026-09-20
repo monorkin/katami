@@ -95,16 +95,10 @@ enum Command {
         #[usage(long)]
         config_dir: PathBuf,
     },
-    /// Share memory with another of your machines over Tailscale; bare, shows who's linked
+    /// Share memory with your other machines over Tailscale
     Link {
-        /// Hostname or IP of any machine already in the mesh
-        host: Option<String>,
-        /// Let in a machine that isn't yours by Tailscale's word, by the code it shows
-        #[usage(long)]
-        accept: Option<String>,
-        /// Take a machine out of the mesh, everywhere
-        #[usage(long)]
-        remove: Option<String>,
+        #[usage(subcommand)]
+        command: LinkCommand,
     },
     /// Listen for linked machines without a session running
     Serve,
@@ -141,6 +135,24 @@ enum RelaysCommand {
     /// Write the relays into codex, pi, and opencode
     Install,
     /// Show each relay's installed state
+    Status,
+}
+
+#[derive(Subcommands)]
+enum LinkCommand {
+    /// Link this machine to any one machine in the mesh; that one introduces the rest
+    Up {
+        /// Its hostname or IP
+        host: String,
+    },
+    /// Take a machine out of the mesh, everywhere
+    Break {
+        /// Its name, as `katami link status` shows it
+        name: String,
+    },
+    /// Let in a machine that isn't yours by Tailscale's word, by the code it shows
+    Accept { code: String },
+    /// Show who's linked, who's asking to pair, and what's waiting to merge
     Status,
 }
 
@@ -285,12 +297,11 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Curate { config_dir } => curator::run(&config_dir, curator::Reason::Scheduled),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
-        Command::Link { host, accept, remove } => match (host, accept, remove) {
-            (Some(host), None, None) => link_cli::link(&host),
-            (None, Some(code), None) => link_cli::accept(&code),
-            (None, None, Some(name)) => link_cli::remove(&name),
-            (None, None, None) => link_cli::status(),
-            _ => anyhow::bail!("`katami link` does one thing at a time — a host, --accept, or --remove"),
+        Command::Link { command } => match command {
+            LinkCommand::Up { host } => link_cli::up(&host),
+            LinkCommand::Break { name } => link_cli::break_with(&name),
+            LinkCommand::Accept { code } => link_cli::accept(&code),
+            LinkCommand::Status => link_cli::status(),
         },
         Command::Serve => link_cli::serve(),
         Command::Setup => setup::run(),

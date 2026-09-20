@@ -67,10 +67,10 @@ katami memory import ~/pair.zip           # memories already here are kept and r
 katami memory import ~/pair.zip --replace # …or the zip's copy wins
 katami memory import ~/pair.zip --merge   # …or haiku writes one memory out of the two
 
-katami link mini                          # share memory with another of your machines, over Tailscale
-katami link                               # who's linked, who's asking to pair, what's waiting to merge
-katami link --accept K7M2-P9XQ            # let in a machine that isn't yours by Tailscale's word
-katami link --remove mini                 # take a machine out of the mesh, everywhere
+katami link up mini                       # share memory with another of your machines, over Tailscale
+katami link status                        # who's linked, who's asking to pair, what's waiting to merge
+katami link accept K7M2-P9XQ              # let in a machine that isn't yours by Tailscale's word
+katami link break mini                    # take a machine out of the mesh, everywhere
 katami serve                              # listen for linked machines without a session running
 katami memory sync                        # sync with every reachable machine and merge conflicts, now
 
@@ -143,7 +143,7 @@ Two tool-specific notes:
   `katami-<name>` entries in the claude config dir's `skills/` before each
   launch, and their usage is tracked through the PostToolUse hook to inform
   curation. A skills dir that's a symlink to shared territory is left alone.
-- **The mesh.** `katami link <hostname|ip>` puts this machine's memory in a
+- **The mesh.** `katami link up <hostname|ip>` puts this machine's memory in a
   mesh with your others. There is no server: every machine holds everything,
   any two can sync, and each passes on what it picked up elsewhere — so a
   memory learned on the laptop reaches the mini PC through the desktop, and a
@@ -156,7 +156,7 @@ Two tool-specific notes:
   - *Trust.* A device owned by the same Tailscale user is one of your
     machines and is trusted on sight. Anyone else's — tailnets are often
     shared — has to be paired: it shows a code, and nothing is exchanged until
-    someone runs `katami link --accept <code>` on the other machine.
+    someone runs `katami link accept <code>` on the other machine.
   - *Conflicts.* Every write is stamped with a version vector, so a store can
     tell a newer version from one written at the same time on another machine.
     Simultaneous edits are never settled by picking a winner: both are kept,
