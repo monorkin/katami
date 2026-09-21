@@ -117,6 +117,17 @@ pub fn runtime_dir() -> PathBuf {
     }
 }
 
+/// A name for something one supervised session owns — its hook socket, its
+/// settings overlay. The process id alone isn't enough: a program built on
+/// katami supervises several sessions at once from one process, and they
+/// would take each other's socket and delete each other's overlay.
+pub fn name_for_one_session() -> String {
+    static SESSIONS_SO_FAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let session = SESSIONS_SO_FAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{session}", std::process::id())
+}
+
 fn home() -> PathBuf {
     dirs::home_dir().expect("could not determine the home directory")
 }

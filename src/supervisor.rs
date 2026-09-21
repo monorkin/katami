@@ -146,7 +146,7 @@ impl HookServer {
         });
         crate::mesh::start();
 
-        let socket_path = directory.join(format!("{}.sock", std::process::id()));
+        let socket_path = directory.join(format!("{}.sock", paths::name_for_one_session()));
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)
             .with_context(|| format!("could not listen on {}", socket_path.display()))?;

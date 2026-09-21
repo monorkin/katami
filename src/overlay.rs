@@ -43,7 +43,7 @@ pub fn write(user_settings: Option<&Path>) -> Result<PathBuf> {
     };
     merge_hooks(&mut settings, &hooks(&agent_binary));
 
-    let path = paths::overlays_dir().join(format!("{}.json", std::process::id()));
+    let path = paths::overlays_dir().join(format!("{}.json", paths::name_for_one_session()));
     fsutil::write_json_atomically(&path, &settings)?;
     Ok(path)
 }
