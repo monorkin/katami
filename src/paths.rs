@@ -58,7 +58,14 @@ fn config_home() -> PathBuf {
     }
 }
 
+/// `KATAMI_DATA_DIR` puts the whole store somewhere of the caller's choosing,
+/// for a program built on katami that keeps a memory of its own rather than
+/// sharing the person's.
 pub fn data_dir() -> PathBuf {
+    if let Some(dir) = env::var_os("KATAMI_DATA_DIR").filter(|it| !it.is_empty()) {
+        return PathBuf::from(dir);
+    }
+
     let base = |root: PathBuf| root.join("katami");
     // One-time move from the pre-rename location, so an existing store keeps
     // its memories under the new name.
