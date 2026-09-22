@@ -9,8 +9,12 @@
 use std::env;
 use std::path::PathBuf;
 
+use crate::settings;
+
 pub fn claude_config_home() -> PathBuf {
-    if let Some(dir) = env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = &settings::settings().claude_config_dir {
+        dir.clone()
+    } else if let Some(dir) = env::var_os("CLAUDE_CONFIG_DIR") {
         PathBuf::from(dir)
     } else {
         home().join(".claude")
@@ -58,12 +62,11 @@ fn config_home() -> PathBuf {
     }
 }
 
-/// `KATAMI_DATA_DIR` puts the whole store somewhere of the caller's choosing,
-/// for a program built on katami that keeps a memory of its own rather than
-/// sharing the person's.
+/// A program built on katami that keeps a memory of its own rather than
+/// sharing the person's says where in `settings`.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = env::var_os("KATAMI_DATA_DIR").filter(|it| !it.is_empty()) {
-        return PathBuf::from(dir);
+    if let Some(dir) = &settings::settings().data_dir {
+        return dir.clone();
     }
 
     let base = |root: PathBuf| root.join("katami");

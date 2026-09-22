@@ -35,6 +35,7 @@ pub mod replica;
 pub mod reranker;
 pub mod reviewer;
 pub mod search;
+pub mod settings;
 pub mod setup;
 pub mod shared;
 pub mod supervisor;
