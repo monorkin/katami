@@ -9,7 +9,7 @@
 //! the two files are merged into the overlay instead of passing the flag
 //! twice, since claude's behavior for a repeated flag is undocumented.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -25,8 +25,7 @@ const EVENTS: [(&str, Option<&str>, u32); 5] = [
 ];
 
 pub fn write(user_settings: Option<&Path>) -> Result<PathBuf> {
-    let agent_binary =
-        std::env::current_exe().context("could not determine the katami binary path")?;
+    let agent_binary = paths::own_binary()?;
 
     let mut settings = match user_settings {
         Some(path) => {
@@ -55,7 +54,11 @@ pub fn remove(path: &Path) {
 fn hooks(agent_binary: &Path) -> Value {
     let mut hooks = serde_json::Map::new();
     for (event, matcher, timeout) in EVENTS {
-        let command = format!("{} hook {event}", agent_binary.display());
+        // Quoted: a path claude's shell can't run has to fail as a command
+        // that isn't there, which is a hook that didn't run. Unquoted, a path
+        // with a space in it is a syntax error — exit 2 — and on
+        // UserPromptSubmit that means the prompt never reaches the model
+        let command = format!("'{}' hook {event}", agent_binary.display());
         let mut entry = serde_json::Map::new();
         if let Some(matcher) = matcher {
             entry.insert("matcher".into(), json!(matcher));
@@ -104,7 +107,7 @@ mod tests {
             let entry = &hooks[event][0];
             let hook = &entry["hooks"][0];
             assert_eq!(hook["type"], "command");
-            assert_eq!(hook["command"], format!("/usr/bin/agent hook {event}"));
+            assert_eq!(hook["command"], format!("'/usr/bin/agent' hook {event}"));
             assert_eq!(hook["timeout"], timeout);
             match matcher {
                 Some(matcher) => assert_eq!(entry["matcher"], matcher),
@@ -128,7 +131,7 @@ mod tests {
         let stop = settings["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["hooks"][0]["command"], "notify-send done");
-        assert_eq!(stop[1]["hooks"][0]["command"], "/usr/bin/agent hook Stop");
+        assert_eq!(stop[1]["hooks"][0]["command"], "'/usr/bin/agent' hook Stop");
         assert!(settings["hooks"]["UserPromptSubmit"].is_array());
     }
 }

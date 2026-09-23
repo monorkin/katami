@@ -6,6 +6,7 @@
 //! matters for two things: which account's auth a background `claude -p`
 //! run uses, and where generated skills get materialized.
 
+use anyhow::{Context, Result};
 use std::env;
 use std::path::PathBuf;
 
@@ -131,6 +132,46 @@ pub fn name_for_one_session() -> String {
     format!("{}-{session}", std::process::id())
 }
 
+/// Katami's own path, for the hooks and helpers it names. A program that was
+/// rebuilt while it ran gets its path back from the kernel with " (deleted)"
+/// on the end, which is not a path anything can run; the binary now at that
+/// path is the new build of the same program, and it answers as well.
+pub fn own_binary() -> Result<PathBuf> {
+    let binary = env::current_exe().context("could not determine the katami binary path")?;
+    Ok(the_build_that_is_there(binary))
+}
+
+fn the_build_that_is_there(binary: PathBuf) -> PathBuf {
+    let named = binary.to_string_lossy().into_owned();
+    match named.strip_suffix(" (deleted)").map(PathBuf::from) {
+        Some(replaced) if replaced.is_file() => replaced,
+        _ => binary,
+    }
+}
+
 fn home() -> PathBuf {
     dirs::home_dir().expect("could not determine the home directory")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_binary_replaced_while_it_ran_is_named_by_the_build_that_took_its_place() {
+        let directory = env::temp_dir().join(format!("katami-own-binary-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let rebuilt = directory.join("katami");
+        std::fs::write(&rebuilt, "#!/bin/sh\n").unwrap();
+
+        let deleted = PathBuf::from(format!("{} (deleted)", rebuilt.display()));
+        assert_eq!(the_build_that_is_there(deleted), rebuilt, "the path without the suffix holds the new build");
+
+        let gone = PathBuf::from(format!("{}/nowhere (deleted)", directory.display()));
+        assert_eq!(the_build_that_is_there(gone.clone()), gone, "with nothing there, nothing is made up");
+        assert_eq!(the_build_that_is_there(rebuilt.clone()), rebuilt);
+        assert!(own_binary().unwrap().is_file(), "and the running test binary is itself");
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

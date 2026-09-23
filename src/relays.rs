@@ -9,7 +9,7 @@
 //! codex gets our hook entries merged into its `hooks.json` with the user's
 //! own entries preserved.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -39,7 +39,7 @@ pub struct Installed {
 /// codex's hooks changed — codex skips untrusted hooks until the user runs
 /// `/hooks` once.
 pub fn install_all() -> Result<()> {
-    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
+    let agent = paths::own_binary()?;
     let installed = install(&agent)?;
     if installed.iter().any(|it| it.tool == "codex" && it.changed) {
         eprintln!(
@@ -50,7 +50,7 @@ pub fn install_all() -> Result<()> {
 }
 
 pub fn install_command() -> Result<()> {
-    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
+    let agent = paths::own_binary()?;
     for entry in install(&agent)? {
         let state = if entry.changed { "installed" } else { "already current" };
         println!("{:<9} {state:<16} {}", entry.tool, entry.path.display());
@@ -138,7 +138,7 @@ fn is_agent_group(group: &Value) -> bool {
 }
 
 fn current_states() -> Result<Vec<(&'static str, PathBuf, bool)>> {
-    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
+    let agent = paths::own_binary()?;
     let pi = pi_path();
     let opencode = opencode_path();
     let codex = codex_hooks_path();

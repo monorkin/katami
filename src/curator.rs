@@ -60,7 +60,7 @@ pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let agent = std::env::current_exe().context("could not determine the katami binary path")?;
+    let agent = paths::own_binary()?;
     let mut command = Command::new(agent);
     command
         .args(["curate", "--config-dir"])
