@@ -31,7 +31,7 @@ pub fn spawn(mut command: Command) -> Result<Pty> {
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
+            if libc::ioctl(slave_fd, TIOCSCTTY, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -44,6 +44,13 @@ pub fn spawn(mut command: Command) -> Result<Pty> {
     drop(slave);
     Ok(Pty { master, child })
 }
+
+#[cfg(target_os = "linux")]
+use libc::TIOCSCTTY;
+
+/// `_IO('t', 97)` in `<sys/ttycom.h>` — libc doesn't bind it for macOS.
+#[cfg(target_os = "macos")]
+const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
 
 fn open_master() -> Result<OwnedFd> {
     let fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
@@ -66,16 +73,36 @@ fn open_master() -> Result<OwnedFd> {
 }
 
 fn open_slave(master: &OwnedFd) -> Result<OwnedFd> {
-    let mut name = [0 as libc::c_char; 128];
-    if unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) } != 0 {
-        bail!("ptsname_r failed: {}", last_error());
-    }
+    let name = slave_name(master)?;
     let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
     if fd < 0 {
         let path = unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy();
         bail!("could not open {path}: {}", last_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(target_os = "linux")]
+fn slave_name(master: &OwnedFd) -> Result<[libc::c_char; 128]> {
+    let mut name = [0 as libc::c_char; 128];
+    if unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) } != 0 {
+        bail!("ptsname_r failed: {}", last_error());
+    }
+    Ok(name)
+}
+
+/// macOS has no `ptsname_r` in libc's bindings, and plain `ptsname` shares one
+/// buffer across threads, so ask the ioctl behind both — `_IOC(IOC_OUT, 't',
+/// 83, 128)` in `<sys/ttycom.h>`, which libc doesn't bind either.
+#[cfg(target_os = "macos")]
+fn slave_name(master: &OwnedFd) -> Result<[libc::c_char; 128]> {
+    const TIOCPTYGNAME: libc::c_ulong = 0x4080_7453;
+
+    let mut name = [0 as libc::c_char; 128];
+    if unsafe { libc::ioctl(master.as_raw_fd(), TIOCPTYGNAME, name.as_mut_ptr()) } < 0 {
+        bail!("could not name the pty: {}", last_error());
+    }
+    Ok(name)
 }
 
 fn clone_stdio(fd: &OwnedFd) -> Result<Stdio> {
@@ -123,10 +150,19 @@ pub fn mirror_window_size(master: &OwnedFd) -> Result<()> {
 /// number into a pipe and the supervisor's poll loop reacts to it.
 pub fn install_signal_pipe() -> Result<OwnedFd> {
     let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
         bail!("could not create the signal pipe: {}", last_error());
     }
     let (read, write) = (fds[0], fds[1]);
+    for fd in fds {
+        let marked = unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) >= 0
+                && libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) >= 0
+        };
+        if !marked {
+            bail!("could not set up the signal pipe: {}", last_error());
+        }
+    }
     SIGNAL_PIPE_WRITE.store(write, std::sync::atomic::Ordering::SeqCst);
 
     for signal in [
@@ -147,13 +183,23 @@ pub fn install_signal_pipe() -> Result<OwnedFd> {
 static SIGNAL_PIPE_WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn forward_signal(signal: libc::c_int) {
-    let saved_errno = unsafe { *libc::__errno_location() };
+    let saved_errno = unsafe { *errno() };
     let fd = SIGNAL_PIPE_WRITE.load(std::sync::atomic::Ordering::SeqCst);
     if fd >= 0 {
         let byte = signal as u8;
         unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
     }
-    unsafe { *libc::__errno_location() = saved_errno };
+    unsafe { *errno() = saved_errno };
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn errno() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn errno() -> *mut libc::c_int {
+    unsafe { libc::__error() }
 }
 
 pub fn is_terminal(fd: libc::c_int) -> bool {

@@ -1,8 +1,11 @@
 # katami
 
 A supervisor for coding agents (claude, codex, pi, opencode) that learns from
-your sessions and injects the memory back as context. Rust, Linux-only,
-distributed through mise.
+your sessions and injects the memory back as context. Rust, Linux and macOS,
+distributed through mise. Platform differences live behind
+`#[cfg(target_os)]` in `pty.rs`; `make build-all` cross-links the macOS
+binaries with `cargo zigbuild`, so check a change compiles there with
+`cargo zigbuild --target aarch64-apple-darwin`.
 
 ## The one rule that will bite you
 
@@ -127,7 +130,8 @@ make install               # → /usr/bin/katami (host toolchain)
 make release               # cross-build musl amd64/arm64, publish GitHub release
 ```
 
-`make release` needs `cross` and Docker/Podman; `Cross.toml` pins the `:main`
+`make release` needs `cross` and Docker/Podman for Linux, and `zig` plus
+`cargo-zigbuild` (both in `mise.toml`) for macOS; `Cross.toml` pins the `:main`
 images because the default pinned ones ship a glibc too old for a current
 rustc.
 

@@ -6,7 +6,8 @@ and quietly builds a memory: what you told it about yourself, your projects,
 and the people you work with comes back as context in future sessions. Works
 with Claude Code, codex, pi, and opencode — one shared memory across all of
 them. Inspired by the memory and curation systems in
-[Hermes](https://github.com/NousResearch/hermes-agent). Linux only.
+[Hermes](https://github.com/NousResearch/hermes-agent). Runs on Linux and
+macOS.
 
 ## Installing
 
@@ -193,9 +194,9 @@ Two tool-specific notes:
 ## Building
 
 ```bash
-mise trust && mise install         # rust, mr-boxington, cross, and gh, from mise.toml
+mise trust && mise install         # rust, mr-boxington, cross, zig, and gh, from mise.toml
 cargo build --release              # → target/release/katami
-sudo make install                  # → /usr/bin/katami
+sudo make install                  # → /usr/bin/katami (/usr/local/bin on macOS)
 ```
 
 A local `make install` just needs the host toolchain. With mise, cargo runs
@@ -205,10 +206,13 @@ sibling checkouts share compiled crates instead of each growing a full
 
 Cutting a release (`make release`, or `make build-all` on its own)
 cross-builds static musl binaries for amd64 and arm64, which needs
-[`cross`](https://github.com/cross-rs/cross) and a running Docker or Podman:
+[`cross`](https://github.com/cross-rs/cross) and a running Docker or Podman,
+and macOS binaries for both through
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild), which needs
+no Mac:
 
 ```bash
-make release        # builds both targets, publishes the GitHub release
+make release        # builds all four targets, publishes the GitHub release
 ```
 
 `Cross.toml` pins the `:main` cross images — the default pinned images ship a

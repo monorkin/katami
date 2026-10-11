@@ -9,3 +9,7 @@ mr-boxington = "latest"
 # Podman running), gh publishes the GitHub release
 "cargo:cross" = "0.2.5"
 gh = "latest"
+
+# …and zigbuild cross-links the macOS binaries without a Mac or its SDK
+zig = "0.17.0"
+"cargo:cargo-zigbuild" = "0.23.4"

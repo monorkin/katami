@@ -47,11 +47,22 @@ struct Status {
 /// `None` when Tailscale isn't installed, isn't running, or isn't logged in —
 /// which only means nothing is trusted on sight and nothing is listened on.
 pub fn status() -> Option<Tailnet> {
-    let output = Command::new("tailscale").args(["status", "--json"]).output().ok()?;
+    let output = cli().args(["status", "--json"]).output().ok()?;
     if output.status.success() {
         Tailnet::parse(&String::from_utf8_lossy(&output.stdout)).ok()
     } else {
         None
+    }
+}
+
+/// The Mac app ships its CLI inside the bundle and leaves putting it on PATH
+/// to the person, which most never do.
+fn cli() -> Command {
+    let bundled = std::path::Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+    if cfg!(target_os = "macos") && bundled.exists() {
+        Command::new(bundled)
+    } else {
+        Command::new("tailscale")
     }
 }
 

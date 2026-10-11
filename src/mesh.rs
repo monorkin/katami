@@ -404,11 +404,14 @@ fn receive(stream: &mut impl BufRead) -> Result<Message> {
 }
 
 pub fn machine_name() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|it| it.trim().to_string())
-        .ok()
-        .filter(|it| !it.is_empty())
-        .unwrap_or_else(|| "unnamed".to_string())
+    let mut name = [0 as libc::c_char; 256];
+    let named = unsafe { libc::gethostname(name.as_mut_ptr(), name.len() - 1) } == 0;
+    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy();
+    if named && !name.trim().is_empty() {
+        name.trim().to_string()
+    } else {
+        "unnamed".to_string()
+    }
 }
 
 /// The log lives in the real data dir, which a test run has no business
