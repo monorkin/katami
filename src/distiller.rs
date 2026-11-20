@@ -105,7 +105,10 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: Option<&Path
         .write_all(input.as_bytes())?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        bail!("claude exited with {}", output.status);
+        match reason_in(&output.stdout) {
+            Some(reason) => bail!("claude exited with {} — {reason}", output.status),
+            None => bail!("claude exited with {}", output.status),
+        }
     }
 
     let envelope = envelope_in(&output.stdout)?;
@@ -128,6 +131,10 @@ fn envelope_in(stdout: &[u8]) -> Result<serde_json::Value> {
             .context("claude's verbose output carried no result message"),
         envelope => Ok(envelope),
     }
+}
+
+fn reason_in(stdout: &[u8]) -> Option<String> {
+    envelope_in(stdout).ok()?["result"].as_str().map(str::to_string)
 }
 
 fn parse<T: DeserializeOwned>(result: &str) -> Result<T> {
@@ -165,5 +172,13 @@ mod tests {
     #[test]
     fn verbose_messages_without_a_result_are_refused() {
         assert!(envelope_in(br#"[{"type":"system"},{"type":"assistant"}]"#).is_err());
+    }
+
+    #[test]
+    fn a_failed_run_gives_its_reason_when_it_has_one() {
+        let logged_out = br#"{"type":"result","result":"Not logged in"}"#;
+
+        assert_eq!(reason_in(logged_out).as_deref(), Some("Not logged in"));
+        assert_eq!(reason_in(b""), None);
     }
 }
