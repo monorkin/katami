@@ -260,7 +260,7 @@ pub fn run(cli: Cli) -> Result<()> {
             RelaysCommand::Install => relays::install_command(),
             RelaysCommand::Status => relays::status_command(),
         },
-        Command::Curate { config_dir } => curator::run(&config_dir, curator::Reason::Scheduled),
+        Command::Curate { config_dir } => curator::run(Some(&config_dir), curator::Reason::Scheduled),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
         Command::Link { command } => match command {
             LinkCommand::Up { host } => link_cli::up(&host),
@@ -308,11 +308,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     (false, true) => transfer::OnCollision::Merge,
                     (false, false) => transfer::OnCollision::Skip,
                 };
-                transfer::import(&path, on_collision, &paths::claude_config_home())
+                transfer::import(&path, on_collision, Some(&paths::claude_config_home()))
             }
             MemoryCommand::Sync => link_cli::sync(),
             MemoryCommand::PullModels => embeddings::pull().and_then(|_| reranker::pull()),
-            MemoryCommand::Curate => curator::run(&paths::claude_config_home(), curator::Reason::Asked),
+            MemoryCommand::Curate => curator::run(Some(&paths::claude_config_home()), curator::Reason::Asked),
         },
         Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
@@ -347,6 +347,6 @@ fn run_review(
         (_, Some(path), _) => transcript::Source::File { tool, path },
         _ => anyhow::bail!("review needs --transcript for a file-based tool, or --session for opencode"),
     };
-    reviewer::run(&source, config_dir, cwd)
+    reviewer::run(&source, Some(config_dir), cwd)
 }
 

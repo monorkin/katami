@@ -188,7 +188,7 @@ fn spawn_detached(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Resu
 
 /// New memories are made here, after the session and its supervisor may be
 /// gone, so this is the moment to hand them to whichever peers are around.
-pub fn run(source: &Source, config_dir: &Path, cwd: Option<&Path>) -> Result<()> {
+pub fn run(source: &Source, config_dir: Option<&Path>, cwd: Option<&Path>) -> Result<()> {
     enqueue(source, cwd)?;
     drain(config_dir)?;
     crate::merger::run(config_dir)?;
@@ -263,7 +263,7 @@ fn role_of(turn: &transcript::Turn) -> String {
 /// Processes queued chunks until none are due. One drainer at a time; a
 /// second caller finding the lock held can leave — the holder will reach its
 /// chunk, and anything it misses waits for the next stop or the curator.
-pub fn drain(config_dir: &Path) -> Result<()> {
+pub fn drain(config_dir: Option<&Path>) -> Result<()> {
     let Some(_lock) = flock::try_acquire(&paths::memory_dir().join("reviewer.lock"))? else {
         return Ok(());
     };
@@ -281,7 +281,7 @@ pub fn drain(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn review_chunk(memory: &Memory, chunk: &ReviewChunk, config_dir: &Path) -> Result<()> {
+fn review_chunk(memory: &Memory, chunk: &ReviewChunk, config_dir: Option<&Path>) -> Result<()> {
     let turns: Vec<LabeledTurn> =
         serde_json::from_str(&chunk.turns).context("the stored chunk turns did not parse")?;
     let entity = chunk.project_entity.as_deref();

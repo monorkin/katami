@@ -121,7 +121,7 @@ fn settle_conflicts() -> Result<()> {
     let waiting = open()?.conflicted_ids()?.len();
     if waiting > 0 {
         println!("Merging {waiting} memories that changed on two machines at once…");
-        merger::run(&paths::claude_config_home())?;
+        merger::run(Some(&paths::claude_config_home()))?;
 
         let left = open()?.conflicted_ids()?.len();
         if left > 0 {

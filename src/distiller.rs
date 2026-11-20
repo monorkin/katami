@@ -44,7 +44,7 @@ const CORRECTIONS: usize = 2;
 pub fn ask<T: DeserializeOwned>(
     prompt: &str,
     input: &str,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
     check: impl Fn(&T) -> Result<()>,
 ) -> Result<T> {
     let reply = run(prompt, input, None, config_dir)?;
@@ -71,13 +71,12 @@ struct Reply {
     result: String,
 }
 
-fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Result<Reply> {
+fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: Option<&Path>) -> Result<Reply> {
     let mut command = Command::new("claude");
     command
         .args(["-p", prompt, "--model", "haiku", "--output-format", "json"])
         .args(READ_ONLY)
         .current_dir(paths::data_dir())
-        .env("CLAUDE_CONFIG_DIR", config_dir)
         .env_remove(hook_protocol::SOCKET_ENV_VAR)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -85,6 +84,10 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Re
     if let Some(session_id) = resume {
         command.args(["--resume", session_id]);
     }
+    match config_dir {
+        Some(config_dir) => command.env("CLAUDE_CONFIG_DIR", config_dir),
+        None => command.env_remove("CLAUDE_CONFIG_DIR"),
+    };
 
     let mut child = command
         .spawn()

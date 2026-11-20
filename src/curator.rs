@@ -85,7 +85,7 @@ pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
 /// Looking after this machine — its skills, embeddings, queue, conflicts, and
 /// files — is every machine's own job. Deciding things for the whole mesh,
 /// what to retire and what the cards say, is for whichever one leads.
-pub fn run(config_dir: &Path, reason: Reason) -> Result<()> {
+pub fn run(config_dir: Option<&Path>, reason: Reason) -> Result<()> {
     let Some(_lock) = flock::try_acquire(&paths::memory_dir().join("curator.lock"))? else {
         return Ok(());
     };
@@ -235,7 +235,7 @@ fn reembed_missing(memory: &Memory) -> Result<()> {
     Ok(())
 }
 
-fn consolidate_entities(memory: &Memory, config_dir: &Path) -> Result<()> {
+fn consolidate_entities(memory: &Memory, config_dir: Option<&Path>) -> Result<()> {
     for entity in memory.entities_with_observations(CONSOLIDATE_AT)? {
         if let Err(error) = consolidate(memory, config_dir, &entity) {
             log(&format!("consolidating {entity} failed: {error:#}"));
@@ -250,7 +250,7 @@ struct Consolidation {
     folded_ids: Vec<Id>,
 }
 
-fn consolidate(memory: &Memory, config_dir: &Path, entity: &str) -> Result<()> {
+fn consolidate(memory: &Memory, config_dir: Option<&Path>, entity: &str) -> Result<()> {
     let observations = memory.observations_for_entity(entity)?;
     let card = memory.card_for_entity(entity)?;
 
