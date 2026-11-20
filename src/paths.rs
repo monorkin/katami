@@ -4,7 +4,10 @@
 //! data directory — memories belong to the person, not to whichever account
 //! or config dir a session happened to run under. Claude's config dir still
 //! matters for two things: which account's auth a background `claude -p`
-//! run uses, and where generated skills get materialized.
+//! run uses, and where generated skills get materialized. Skills need a
+//! folder, so they get the default one when none was named. Auth needs to
+//! know whether one was named at all: claude keeps a named config dir's login
+//! apart from the default one, even when both are the same folder.
 
 use anyhow::{Context, Result};
 use std::env;
@@ -13,13 +16,14 @@ use std::path::PathBuf;
 use crate::settings;
 
 pub fn claude_config_home() -> PathBuf {
-    if let Some(dir) = &settings::settings().claude_config_dir {
-        dir.clone()
-    } else if let Some(dir) = env::var_os("CLAUDE_CONFIG_DIR") {
-        PathBuf::from(dir)
-    } else {
-        home().join(".claude")
-    }
+    claude_config_dir().unwrap_or_else(|| home().join(".claude"))
+}
+
+pub fn claude_config_dir() -> Option<PathBuf> {
+    settings::settings()
+        .claude_config_dir
+        .clone()
+        .or_else(|| env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
 }
 
 /// Where the other coding tools keep the config the relays install into.

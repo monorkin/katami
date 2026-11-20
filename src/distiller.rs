@@ -3,9 +3,11 @@
 //! The reviewer and curator both work the same way: hand a headless
 //! `claude -p --model haiku` a prompt and some input, get strict JSON back,
 //! deserialize it into a typed contract. The session's own CLAUDE_CONFIG_DIR
-//! rides along so the right account's auth pays for the call, and the hook
-//! socket is stripped so the headless run's hooks no-op instead of relaying
-//! into the live session.
+//! rides along so the right account's auth pays for the call — and stays unset
+//! when the session had none, because claude treats a named config dir as a
+//! login of its own, even one that names the default folder. The hook socket
+//! is stripped so the headless run's hooks no-op instead of relaying into the
+//! live session.
 //!
 //! Haiku occasionally answers in prose or bends the schema. Rather than burn a
 //! whole retry with backoff on that, the same session is resumed with the

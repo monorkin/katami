@@ -7,11 +7,12 @@
 //! testable; there's no framing to get wrong beyond "one line each way".
 //!
 //! A frame names the `tool` it came from and, for Claude, the hook process's
-//! effective `CLAUDE_CONFIG_DIR`. The supervisor can't know pre-launch which
-//! config dir a wrapper like `ax run` will pick, but hooks are children of
-//! claude and inherit its environment — so the frame is where that knowledge
-//! crosses over. Other tools don't carry it: they don't have per-account
-//! config dirs the reviewer needs.
+//! `CLAUDE_CONFIG_DIR` when it has one, along with the folder claude keeps
+//! its config in either way. The supervisor can't know pre-launch which
+//! config dir or home a wrapper like `ax run` will pick, but hooks are
+//! children of claude and inherit its environment — so the frame is where
+//! that knowledge crosses over. Other tools don't carry it: they don't have
+//! per-account config dirs the reviewer needs.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,8 @@ pub struct HookRequest {
     pub tool: Tool,
     #[serde(default)]
     pub config_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub config_home: Option<PathBuf>,
     pub payload: serde_json::Value,
 }
 
@@ -110,6 +113,7 @@ mod tests {
             event: "UserPromptSubmit".into(),
             tool: Tool::Codex,
             config_dir: None,
+            config_home: None,
             payload: json!({
                 "session_id": "abc123",
                 "transcript_path": "/tmp/transcript.jsonl",

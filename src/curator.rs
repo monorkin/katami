@@ -51,7 +51,7 @@ fn archive_skills_after_days() -> u64 {
         .unwrap_or(90)
 }
 
-pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
+pub fn maybe_spawn(config_dir: Option<&Path>) -> Result<()> {
     let memory = Memory::open(&paths::memory_dir())?;
     // At most one automatic run per calendar day; `katami memory curate` is always manual
     if let Some(last_run) = memory.state("curator_last_run")?
@@ -63,11 +63,13 @@ pub fn maybe_spawn(config_dir: &Path) -> Result<()> {
     let agent = paths::own_binary()?;
     let mut command = Command::new(agent);
     command
-        .args(["curate", "--config-dir"])
-        .arg(config_dir)
+        .arg("curate")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(config_dir) = config_dir {
+        command.arg("--config-dir").arg(config_dir);
+    }
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {

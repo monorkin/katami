@@ -100,7 +100,7 @@ struct LabeledTurn {
 /// Called on Stop: spawns a detached review once enough of the conversation
 /// has accumulated — the hook must return within its timeout, so the review
 /// itself never runs inline.
-pub fn maybe_spawn(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
+pub fn maybe_spawn(source: &Source, config_dir: Option<&Path>, cwd: Option<&str>) -> Result<()> {
     let turns = unreviewed_turns(source)?;
     if transcript::user_turns(&turns) >= DEBOUNCE_USER_TURNS {
         spawn_detached(source, config_dir, cwd)?;
@@ -111,7 +111,7 @@ pub fn maybe_spawn(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Res
 /// Called on SessionEnd, and for every session the supervisor saw once the
 /// child exits — the conversation will fire no more events, so anything
 /// unreviewed gets queued now, debounce or no debounce.
-pub fn spawn_final_review(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
+pub fn spawn_final_review(source: &Source, config_dir: Option<&Path>, cwd: Option<&str>) -> Result<()> {
     if !unreviewed_turns(source)?.is_empty() {
         spawn_detached(source, config_dir, cwd)?;
     }
@@ -152,15 +152,17 @@ fn read_delta(memory: &Memory, source: &Source, context_limit: usize) -> Result<
     }
 }
 
-fn spawn_detached(source: &Source, config_dir: &Path, cwd: Option<&str>) -> Result<()> {
+fn spawn_detached(source: &Source, config_dir: Option<&Path>, cwd: Option<&str>) -> Result<()> {
     let agent = paths::own_binary()?;
     let mut command = Command::new(agent);
     command
-        .args(["review", "--config-dir"])
-        .arg(config_dir)
+        .arg("review")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(config_dir) = config_dir {
+        command.arg("--config-dir").arg(config_dir);
+    }
     match source {
         Source::File { tool, path } => {
             command.args(["--tool", tool.as_str(), "--transcript"]).arg(path);
