@@ -9,6 +9,10 @@
 //! is stripped so the headless run's hooks no-op instead of relaying into the
 //! live session.
 //!
+//! With `verbose` on in the person's claude config, `--output-format json`
+//! prints every message of the run instead of the one envelope, so the
+//! envelope is picked out of whichever arrives.
+//!
 //! Haiku occasionally answers in prose or bends the schema. Rather than burn a
 //! whole retry with backoff on that, the same session is resumed with the
 //! parse error and asked for the JSON again, up to three tries in all — it
@@ -104,8 +108,7 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: Option<&Path
         bail!("claude exited with {}", output.status);
     }
 
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("claude's --output-format json envelope did not parse")?;
+    let envelope = envelope_in(&output.stdout)?;
     let result = envelope["result"]
         .as_str()
         .context("claude's output carried no result field")?;
@@ -113,6 +116,18 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: Option<&Path
         .as_str()
         .context("claude's output carried no session_id field")?;
     Ok(Reply { session_id: session_id.to_string(), result: result.to_string() })
+}
+
+fn envelope_in(stdout: &[u8]) -> Result<serde_json::Value> {
+    let envelope = serde_json::from_slice::<serde_json::Value>(stdout)
+        .context("claude's --output-format json envelope did not parse")?;
+    match envelope {
+        serde_json::Value::Array(messages) => messages
+            .into_iter()
+            .find(|it| it["type"] == "result")
+            .context("claude's verbose output carried no result message"),
+        envelope => Ok(envelope),
+    }
 }
 
 fn parse<T: DeserializeOwned>(result: &str) -> Result<T> {
@@ -136,5 +151,19 @@ mod tests {
     fn fenced_json_is_unwrapped() {
         assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn the_envelope_is_found_alone_or_among_verbose_messages() {
+        let alone = br#"{"type":"result","result":"ok"}"#;
+        let verbose = br#"[{"type":"system"},{"type":"assistant"},{"type":"result","result":"ok"}]"#;
+
+        assert_eq!(envelope_in(alone).unwrap()["result"], "ok");
+        assert_eq!(envelope_in(verbose).unwrap()["result"], "ok");
+    }
+
+    #[test]
+    fn verbose_messages_without_a_result_are_refused() {
+        assert!(envelope_in(br#"[{"type":"system"},{"type":"assistant"}]"#).is_err());
     }
 }
