@@ -45,7 +45,7 @@ pub enum Command {
         #[usage(long)]
         session: Option<String>,
         #[usage(long)]
-        config_dir: PathBuf,
+        config_dir: Option<PathBuf>,
         #[usage(long)]
         cwd: Option<PathBuf>,
     },
@@ -58,7 +58,7 @@ pub enum Command {
     #[usage(hide = true)]
     Curate {
         #[usage(long)]
-        config_dir: PathBuf,
+        config_dir: Option<PathBuf>,
     },
     /// Share memory with your other machines over Tailscale
     Link {
@@ -255,12 +255,12 @@ pub fn run(cli: Cli) -> Result<()> {
             session,
             config_dir,
             cwd,
-        } => run_review(&tool, transcript, session, &config_dir, cwd.as_deref()),
+        } => run_review(&tool, transcript, session, config_dir.as_deref(), cwd.as_deref()),
         Command::Relays { command } => match command {
             RelaysCommand::Install => relays::install_command(),
             RelaysCommand::Status => relays::status_command(),
         },
-        Command::Curate { config_dir } => curator::run(&config_dir, curator::Reason::Scheduled),
+        Command::Curate { config_dir } => curator::run(config_dir.as_deref(), curator::Reason::Scheduled),
         Command::Log { lines, follow } => log_cli::print(lines, follow),
         Command::Link { command } => match command {
             LinkCommand::Up { host } => link_cli::up(&host),
@@ -308,11 +308,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     (false, true) => transfer::OnCollision::Merge,
                     (false, false) => transfer::OnCollision::Skip,
                 };
-                transfer::import(&path, on_collision, &paths::claude_config_home())
+                transfer::import(&path, on_collision, paths::claude_config_dir().as_deref())
             }
             MemoryCommand::Sync => link_cli::sync(),
             MemoryCommand::PullModels => embeddings::pull().and_then(|_| reranker::pull()),
-            MemoryCommand::Curate => curator::run(&paths::claude_config_home(), curator::Reason::Asked),
+            MemoryCommand::Curate => curator::run(paths::claude_config_dir().as_deref(), curator::Reason::Asked),
         },
         Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
@@ -336,7 +336,7 @@ fn run_review(
     tool: &str,
     transcript: Option<PathBuf>,
     session: Option<String>,
-    config_dir: &PathBuf,
+    config_dir: Option<&Path>,
     cwd: Option<&Path>,
 ) -> Result<()> {
     let tool = hook_protocol::Tool::parse(tool).unwrap_or_default();

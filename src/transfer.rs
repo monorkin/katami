@@ -114,7 +114,7 @@ fn destination(to: Option<PathBuf>) -> PathBuf {
     }
 }
 
-pub fn import(path: &Path, on_collision: OnCollision, config_dir: &Path) -> Result<()> {
+pub fn import(path: &Path, on_collision: OnCollision, config_dir: Option<&Path>) -> Result<()> {
     let arriving = bundle::read(path)?;
     let memory = Memory::open(&paths::memory_dir())?;
     let outcome = import_into(&memory, arriving, on_collision, config_dir)?;
@@ -152,7 +152,7 @@ pub fn import_into(
     memory: &Memory,
     arriving: Vec<Portable>,
     on_collision: OnCollision,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
 ) -> Result<Outcome> {
     let decisions = arriving
         .into_iter()
@@ -180,7 +180,7 @@ pub fn import_into(
     })
 }
 
-fn decide(memory: &Memory, arriving: Portable, on_collision: OnCollision, config_dir: &Path) -> Result<Decision> {
+fn decide(memory: &Memory, arriving: Portable, on_collision: OnCollision, config_dir: Option<&Path>) -> Result<Decision> {
     if memory.exists(arriving.id)? {
         let existing = memory.portable(arriving.id)?;
         if existing.says_the_same_as(&arriving) {
@@ -199,7 +199,7 @@ fn decide_among_twins(
     memory: &Memory,
     arriving: Portable,
     on_collision: OnCollision,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
 ) -> Result<Decision> {
     let twins = memory
         .twins_of(&arriving)?
@@ -224,7 +224,7 @@ fn settle(
     existing: Portable,
     arriving: Portable,
     on_collision: OnCollision,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
 ) -> Result<Decision> {
     match on_collision {
         OnCollision::Skip => Ok(Decision::Skip(arriving.title)),
@@ -244,7 +244,7 @@ fn settle(
 
 /// One body out of two, written by haiku — unless the two already agree, in
 /// which case the disagreement is about something a model has no say in.
-pub fn merged_body(existing: &Portable, arriving: &Portable, config_dir: &Path) -> Result<String> {
+pub fn merged_body(existing: &Portable, arriving: &Portable, config_dir: Option<&Path>) -> Result<String> {
     if existing.body.trim() == arriving.body.trim() {
         return Ok(existing.body.trim().to_string());
     }
@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn import_with(memory: &Memory, arriving: Vec<Portable>, on_collision: OnCollision) -> Outcome {
-        import_into(memory, arriving, on_collision, Path::new("/nonexistent")).unwrap()
+        import_into(memory, arriving, on_collision, Some(Path::new("/nonexistent"))).unwrap()
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
             &memory,
             vec![observation("First", "Body."), unstorable],
             OnCollision::Skip,
-            Path::new("/nonexistent"),
+            Some(Path::new("/nonexistent")),
         );
         assert!(result.is_err());
         assert!(memory.ids().unwrap().is_empty());

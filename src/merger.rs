@@ -22,7 +22,7 @@ use crate::memory::Memory;
 use crate::paths;
 use crate::transfer;
 
-pub fn run(config_dir: &Path) -> Result<()> {
+pub fn run(config_dir: Option<&Path>) -> Result<()> {
     let Some(_lock) = flock::try_acquire(&paths::memory_dir().join("merger.lock"))? else {
         return Ok(());
     };
@@ -31,7 +31,7 @@ pub fn run(config_dir: &Path) -> Result<()> {
 
 /// Siblings are merged one at a time into whatever the local version has
 /// become, so three machines editing at once still end as one memory.
-pub fn merge_conflicts(memory: &Memory, config_dir: &Path) -> Result<()> {
+pub fn merge_conflicts(memory: &Memory, config_dir: Option<&Path>) -> Result<()> {
     for id in memory.conflicted_ids()? {
         for sibling in memory.siblings_of(id)? {
             let local = memory.portable(id)?;
@@ -90,7 +90,7 @@ mod tests {
         pull(&laptop, &mini);
         assert_eq!(laptop.conflicted_ids().unwrap(), vec![id]);
 
-        merge_conflicts(&laptop, Path::new("/nonexistent")).unwrap();
+        merge_conflicts(&laptop, Some(Path::new("/nonexistent"))).unwrap();
 
         let merged = laptop.portable(id).unwrap();
         assert!(laptop.conflicted_ids().unwrap().is_empty());

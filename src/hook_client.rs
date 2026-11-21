@@ -33,13 +33,15 @@ fn relay(tool: Tool, event: &str) -> Result<serde_json::Value> {
     let mut payload = String::new();
     std::io::stdin().read_to_string(&mut payload)?;
 
+    let (config_dir, config_home) = match tool {
+        Tool::Claude => (paths::claude_config_dir(), Some(paths::claude_config_home())),
+        _ => (None, None),
+    };
     let request = HookRequest {
         event: event.to_string(),
         tool,
-        config_dir: match tool {
-            Tool::Claude => Some(paths::claude_config_home()),
-            _ => None,
-        },
+        config_dir,
+        config_home,
         payload: serde_json::from_str(&payload)?,
     };
 

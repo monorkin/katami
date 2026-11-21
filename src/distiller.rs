@@ -3,9 +3,15 @@
 //! The reviewer and curator both work the same way: hand a headless
 //! `claude -p --model haiku` a prompt and some input, get strict JSON back,
 //! deserialize it into a typed contract. The session's own CLAUDE_CONFIG_DIR
-//! rides along so the right account's auth pays for the call, and the hook
-//! socket is stripped so the headless run's hooks no-op instead of relaying
-//! into the live session.
+//! rides along so the right account's auth pays for the call — and stays unset
+//! when the session had none, because claude treats a named config dir as a
+//! login of its own, even one that names the default folder. The hook socket
+//! is stripped so the headless run's hooks no-op instead of relaying into the
+//! live session.
+//!
+//! With `verbose` on in the person's claude config, `--output-format json`
+//! prints every message of the run instead of the one envelope, so the
+//! envelope is picked out of whichever arrives.
 //!
 //! Haiku occasionally answers in prose or bends the schema. Rather than burn a
 //! whole retry with backoff on that, the same session is resumed with the
@@ -44,7 +50,7 @@ const CORRECTIONS: usize = 2;
 pub fn ask<T: DeserializeOwned>(
     prompt: &str,
     input: &str,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
     check: impl Fn(&T) -> Result<()>,
 ) -> Result<T> {
     let reply = run(prompt, input, None, config_dir)?;
@@ -71,13 +77,12 @@ struct Reply {
     result: String,
 }
 
-fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Result<Reply> {
+fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: Option<&Path>) -> Result<Reply> {
     let mut command = Command::new("claude");
     command
         .args(["-p", prompt, "--model", "haiku", "--output-format", "json"])
         .args(READ_ONLY)
         .current_dir(paths::data_dir())
-        .env("CLAUDE_CONFIG_DIR", config_dir)
         .env_remove(hook_protocol::SOCKET_ENV_VAR)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -85,6 +90,10 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Re
     if let Some(session_id) = resume {
         command.args(["--resume", session_id]);
     }
+    match config_dir {
+        Some(config_dir) => command.env("CLAUDE_CONFIG_DIR", config_dir),
+        None => command.env_remove("CLAUDE_CONFIG_DIR"),
+    };
 
     let mut child = command
         .spawn()
@@ -96,11 +105,13 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Re
         .write_all(input.as_bytes())?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        bail!("claude exited with {}", output.status);
+        match reason_in(&output.stdout) {
+            Some(reason) => bail!("claude exited with {} — {reason}", output.status),
+            None => bail!("claude exited with {}", output.status),
+        }
     }
 
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("claude's --output-format json envelope did not parse")?;
+    let envelope = envelope_in(&output.stdout)?;
     let result = envelope["result"]
         .as_str()
         .context("claude's output carried no result field")?;
@@ -108,6 +119,22 @@ fn run(prompt: &str, input: &str, resume: Option<&str>, config_dir: &Path) -> Re
         .as_str()
         .context("claude's output carried no session_id field")?;
     Ok(Reply { session_id: session_id.to_string(), result: result.to_string() })
+}
+
+fn envelope_in(stdout: &[u8]) -> Result<serde_json::Value> {
+    let envelope = serde_json::from_slice::<serde_json::Value>(stdout)
+        .context("claude's --output-format json envelope did not parse")?;
+    match envelope {
+        serde_json::Value::Array(messages) => messages
+            .into_iter()
+            .find(|it| it["type"] == "result")
+            .context("claude's verbose output carried no result message"),
+        envelope => Ok(envelope),
+    }
+}
+
+fn reason_in(stdout: &[u8]) -> Option<String> {
+    envelope_in(stdout).ok()?["result"].as_str().map(str::to_string)
 }
 
 fn parse<T: DeserializeOwned>(result: &str) -> Result<T> {
@@ -131,5 +158,27 @@ mod tests {
     fn fenced_json_is_unwrapped() {
         assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn the_envelope_is_found_alone_or_among_verbose_messages() {
+        let alone = br#"{"type":"result","result":"ok"}"#;
+        let verbose = br#"[{"type":"system"},{"type":"assistant"},{"type":"result","result":"ok"}]"#;
+
+        assert_eq!(envelope_in(alone).unwrap()["result"], "ok");
+        assert_eq!(envelope_in(verbose).unwrap()["result"], "ok");
+    }
+
+    #[test]
+    fn verbose_messages_without_a_result_are_refused() {
+        assert!(envelope_in(br#"[{"type":"system"},{"type":"assistant"}]"#).is_err());
+    }
+
+    #[test]
+    fn a_failed_run_gives_its_reason_when_it_has_one() {
+        let logged_out = br#"{"type":"result","result":"Not logged in"}"#;
+
+        assert_eq!(reason_in(logged_out).as_deref(), Some("Not logged in"));
+        assert_eq!(reason_in(b""), None);
     }
 }

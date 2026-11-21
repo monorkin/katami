@@ -110,7 +110,7 @@ impl Supervision {
 fn review_seen_sessions(context: &ServerContext) {
     let sessions = context.sessions.lock().unwrap();
     for seen in sessions.values() {
-        let _ = reviewer::spawn_final_review(&seen.source, &seen.config_dir, seen.cwd.as_deref());
+        let _ = reviewer::spawn_final_review(&seen.source, seen.config_dir.as_deref(), seen.cwd.as_deref());
     }
 }
 
@@ -132,7 +132,7 @@ struct ServerContext {
 struct SeenSession {
     source: transcript::Source,
     cwd: Option<String>,
-    config_dir: PathBuf,
+    config_dir: Option<PathBuf>,
 }
 
 impl HookServer {
@@ -209,15 +209,15 @@ fn serve_connection(stream: UnixStream, context: &ServerContext) {
         return;
     };
 
-    // Only claude frames carry a config dir, and only claude cares which one
+    // Only claude frames carry a config home, and only claude cares which one
     // it launched under (the reviewer's auth account, the skills dir)
     if request.tool == Tool::Claude
-        && let Some(config_dir) = &request.config_dir
+        && let Some(config_home) = &request.config_home
         && !context
             .launch_recorded
             .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        let _ = launches::record(&context.launch_key, config_dir);
+        let _ = launches::record(&context.launch_key, config_home);
     }
     remember_session(context, &request);
 
@@ -265,16 +265,16 @@ fn dispatch(request: &HookRequest) -> Result<Option<serde_json::Value>> {
 
 fn on_stop(request: &HookRequest) -> Result<Option<serde_json::Value>> {
     if let Some(source) = source_of(request) {
-        reviewer::maybe_spawn(&source, &config_dir(request), cwd_of(request))?;
+        reviewer::maybe_spawn(&source, config_dir(request).as_deref(), cwd_of(request))?;
     }
     Ok(None)
 }
 
 fn on_session_end(request: &HookRequest) -> Result<Option<serde_json::Value>> {
     if let Some(source) = source_of(request) {
-        reviewer::spawn_final_review(&source, &config_dir(request), cwd_of(request))?;
+        reviewer::spawn_final_review(&source, config_dir(request).as_deref(), cwd_of(request))?;
     }
-    curator::maybe_spawn(&config_dir(request))?;
+    curator::maybe_spawn(config_dir(request).as_deref())?;
     Ok(None)
 }
 
@@ -295,14 +295,14 @@ fn cwd_of(request: &HookRequest) -> Option<&str> {
     request.payload["cwd"].as_str()
 }
 
-/// The reviewer and curator need a claude config dir for their `claude -p`
-/// runs; only claude frames carry one, so everything else falls back to the
-/// user's default login.
-fn config_dir(request: &HookRequest) -> PathBuf {
-    request
-        .config_dir
-        .clone()
-        .unwrap_or_else(paths::claude_config_home)
+/// The reviewer and curator log in the way the session did. A claude frame
+/// says which config dir it ran under, if any; every other tool's session
+/// borrows the login katami itself was started with.
+fn config_dir(request: &HookRequest) -> Option<PathBuf> {
+    match request.tool {
+        Tool::Claude => request.config_dir.clone(),
+        _ => paths::claude_config_dir(),
+    }
 }
 
 fn on_session_start(request: &HookRequest) -> Result<Option<serde_json::Value>> {
